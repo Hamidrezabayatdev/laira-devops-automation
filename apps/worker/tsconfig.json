@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "paths": {
+      "@laira/db": ["../../packages/db/src/index.ts"],
+      "@laira/security": ["../../packages/security/src/index.ts"],
+      "pg": ["../../packages/db/node_modules/pg"]
+    },
+    "typeRoots": [
+      "../../node_modules/@types",
+      "../../packages/db/node_modules/@types"
+    ]
+  },
+  "references": [
+    { "path": "../../packages/security" },
+    { "path": "../../packages/db" }
+  ],
+  "include": ["src/**/*"]
+}

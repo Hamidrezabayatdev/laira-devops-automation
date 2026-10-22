@@ -1,0 +1,9 @@
+# Optional local cache override for environments where the tagged registry pull
+# is denied. These digests were inspected from already available local images.
+services:
+  postgres:
+    image: postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    pull_policy: never
+  minio:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    pull_policy: never

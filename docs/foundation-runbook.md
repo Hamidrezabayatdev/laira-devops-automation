@@ -7,6 +7,7 @@ This runbook covers the foundation only. It does not authorize infrastructure wr
 - Web liveness proves the HTTP process is responsive; it does not prove database or worker readiness.
 - Check database readiness and the worker's persisted heartbeat separately. A running web process with an absent/stale worker must be presented as degraded.
 - Persist runs/events and outbox rows before dispatch. Restart the worker normally; do not delete queue/domain rows to make a stuck run appear healthy.
+- A dispatch outbox row marked `failed` represents a durable retry wait, not a terminally abandoned run: dispatch failures retry with persisted attempt count and capped exponential delay (1s, 2s, 4s … max 60s). Inspect safe status/attempt counters during outage diagnosis; do not reset rows manually or infer provider success from queue acceptance. This retry policy applies only to the read-only fixture dispatch, not uncertain infrastructure mutations.
 - Fixture job replay is safe only because the task is read-only and application handling is idempotent. Do not reuse this argument for deploy/create/restart operations.
 - For a later dispatched infrastructure operation with uncertain outcome, preserve ledger intent and halt dependent writes. Reconcile observable provider state; never resend merely because its lease expired.
 

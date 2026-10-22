@@ -1,0 +1,82 @@
+@import "@fontsource-variable/vazirmatn";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #181818;
+  --foreground: #f4f4f5;
+  --card: #23252D;
+  --card-foreground: #f4f4f5;
+  --popover: #23252D;
+  --popover-foreground: #f4f4f5;
+  --primary: #28c1f5;
+  --primary-foreground: #181818;
+  --secondary: #2a2d37;
+  --secondary-foreground: #e4e4e7;
+  --muted: #2e323d;
+  --muted-foreground: #9ca3af;
+  --accent: #2e323d;
+  --accent-foreground: #f4f4f5;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #323644;
+  --input: #323644;
+  --ring: #28c1f5;
+  --radius: 0.75rem;
+
+  /* Brand semantic tokens */
+  --brand-mint: #87fcc4;
+  --brand-cyan: #28c1f5;
+  --brand-ink: #181818;
+  --brand-gradient: linear-gradient(135deg, #87fcc4 0%, #28c1f5 100%);
+  --brand-surface: #23252D;
+  --brand-surface-elevated: #282b35;
+
+  /* Status semantic colors */
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-error: #ef4444;
+  --status-info: #3b82f6;
+  --status-queued: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: "Vazirmatn Variable", "Vazirmatn", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Technical text LTR isolation */
+.ltr-embed {
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
+  display: inline-block;
+  text-align: left;
+}
+
+/* Scrollbar styles for dark console */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}

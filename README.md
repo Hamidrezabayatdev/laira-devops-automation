@@ -2,7 +2,7 @@
 
 A Persian-first technical colleague for Liara application owners: understand source, propose bounded changes, obtain approval, execute safely, and verify outcomes.
 
-**Implementation status: foundation work in progress.** This is not yet a completed hackathon MVP or production deployment tool. The original product brief and approved implementation plan are preserved in this repository. No infrastructure write tools are enabled in the foundation batch.
+**Implementation status: independently reviewed fixture-only foundation.** This is not a completed hackathon MVP or production deployment tool. The integrated review accepted the scoped foundation after correcting its material findings; clean-workspace install/build/typecheck/unit checks also passed. Live OAuth verification remains a separately recorded limitation. The original product brief and approved implementation plan are preserved in this repository. No infrastructure write tools are enabled in the foundation batch.
 
 ## Stack and process model
 
@@ -27,7 +27,7 @@ pnpm build
 Database integration tests are explicitly opt-in and must use an isolated database. With `TEST_DATABASE_URL` set in ignored `.env`:
 
 ```sh
-node --env-file=.env node_modules/vitest/vitest.mjs run packages/db/test apps/worker/test
+pnpm test:integration -- packages/db/test apps/worker/test
 ```
 
 Read the tests before changing that URL; never point integration tests at an unrelated or production database. Provider tests use fixtures, not live API calls. A separately opt-in model smoke is billable and should not be repeatedly run as part of routine tests.

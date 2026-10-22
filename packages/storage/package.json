@@ -1,0 +1,35 @@
+{
+  "name": "@laira/storage",
+  "version": "0.1.0",
+  "description": "Private S3-compatible tenant-scoped artifact storage adapter for Liara Agentic DevOps",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./mock": {
+      "types": "./dist/mock/mock-s3.d.ts",
+      "import": "./dist/mock/mock-s3.js",
+      "default": "./dist/mock/mock-s3.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run -c vitest.config.ts",
+    "smoke:minio": "node dist/cli/minio-smoke.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1155.0",
+    "zod": "3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.8.2",
+    "vitest": "3.2.7"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "composite": true,
+    "paths": {
+      "@laira/security": ["../security/src/index.ts"]
+    }
+  },
+  "references": [
+    { "path": "../security" }
+  ],
+  "include": ["src/**/*"]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@laira/worker",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "test": "vitest run -c vitest.config.ts"
+  },
+  "dependencies": {
+    "@laira/db": "workspace:*",
+    "@laira/security": "workspace:*",
+    "pg": "8.23.1",
+    "pg-boss": "12.38.0",
+    "zod": "3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "typescript": "5.8.2"
+  }
+}

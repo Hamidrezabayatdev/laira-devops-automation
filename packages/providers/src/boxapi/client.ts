@@ -13,7 +13,7 @@ import {
   type IRunBudgetController,
   type IWorkspaceConcurrencyController,
   type IAiStopController,
-} from './types.ts';
+} from './types.js';
 import {
   BoxApiError,
   AuthDeniedDisableError,
@@ -24,22 +24,23 @@ import {
   MalformedPayloadError,
   InterruptedStreamError,
   MalformedToolCallError,
-} from './errors.ts';
+} from './errors.js';
 import {
   RunBudgetController,
   WorkspaceConcurrencyController,
   AiStopController,
   OwnerIdentityGate,
-} from './budget.ts';
-import { formatToolsForOpenAi, validateAndParseToolCall } from './tools.ts';
-import { calculateUsage } from './usage.ts';
-import { StreamAccumulator, type AccumulatedStreamResult } from './stream.ts';
+} from './budget.js';
+import { formatToolsForOpenAi, validateAndParseToolCall } from './tools.js';
+import { calculateUsage } from './usage.js';
+import { StreamAccumulator, type AccumulatedStreamResult } from './stream.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_ALLOWED_OUTPUT_TOKENS = 8_192;
 
 export interface ChatDispatchOptions {
   runId: string;
+  signal?: AbortSignal;
   messages: ChatMessage[];
   tools?: Array<SafeToolDefinition<any>>;
   maxTokens?: number;
@@ -458,6 +459,7 @@ export class BoxApiClient {
    * Dispatches a non-streaming chat completion to BoxAPI using official OpenAI SDK.
    */
   async chat(options: ChatDispatchOptions): Promise<BoxApiChatResponse> {
+    options.signal?.throwIfAborted();
     const { payload, releaseConcurrency } = await this.preflight(options.runId, false, options);
 
     const controller = new AbortController();
@@ -465,7 +467,7 @@ export class BoxApiClient {
 
     try {
       const completion: any = await this.#openai.chat.completions.create(payload as any, {
-        signal: controller.signal,
+        signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
       });
 
       // Strict completion shape validation
@@ -486,7 +488,7 @@ export class BoxApiClient {
 
       const message = choice.message;
 
-      let toolCalls: import('./types.ts').SafeToolCall[] | undefined;
+      let toolCalls: import('./types.js').SafeToolCall[] | undefined;
       if (message?.tool_calls && Array.isArray(message.tool_calls)) {
         const toolDefMap = new Map(options.tools?.map((t) => [t.name, t]) || []);
         toolCalls = message.tool_calls.map((tc: any) => {
@@ -516,6 +518,7 @@ export class BoxApiClient {
    * Dispatches a streaming chat completion to BoxAPI using official OpenAI SDK.
    */
   async streamChat(options: StreamDispatchOptions): Promise<AccumulatedStreamResult> {
+    options.signal?.throwIfAborted();
     const { payload, releaseConcurrency } = await this.preflight(options.runId, true, options);
 
     const controller = new AbortController();
@@ -529,7 +532,7 @@ export class BoxApiClient {
           stream_options: { include_usage: true },
         },
         {
-          signal: controller.signal,
+          signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
         }
       );
 

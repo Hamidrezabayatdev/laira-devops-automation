@@ -1,6 +1,6 @@
-import type { SafeToolDefinition, SafeToolCall } from './types.ts';
-import { MalformedToolCallError } from './errors.ts';
-import { zodToJsonSchema, type TypedValidator } from '../schema/validator.ts';
+import type { SafeToolDefinition, SafeToolCall } from './types.js';
+import { MalformedToolCallError } from './errors.js';
+import { zodToJsonSchema, type TypedValidator } from '../schema/validator.js';
 import { zodFunction } from 'openai/helpers/zod';
 import { z } from 'zod';
 

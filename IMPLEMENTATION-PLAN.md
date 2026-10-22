@@ -2,6 +2,10 @@
 
 **Status:** Approved for implementation. This file preserves the product and delivery decisions from the approved plan. It is a specification, not a claim that every described phase has been implemented.
 
+## Current delivery slice (product-first integration)
+
+The immediate implementation joins authenticated assistant tasks, actual Deep Agents reasoning with bounded read-only tools, immutable public GitHub source, exact server-constructed proposals, explicit owner approval and a separate durable action run. Initial deployment targets an **existing Liara app**; resource creation/plan selection requires a later exact approval. Deep Agents uses virtual in-memory state without host filesystem or shell tools. PostgreSQL persists runs/proposals/approvals, but resumable graph checkpoints and continuous monitoring are not delivered by this slice. This narrows the next milestone, not the longer-term product intent below. See [the walkthrough and current limits](docs/assistant-product-slice.md); implementation is not evidence of live success.
+
 ## 1. Product and decisions
 
 Build a technical colleague for Liara application owners: import and understand source, deploy it, monitor it, investigate operational failures, propose bounded changes, request owner approval, execute through Liara, and verify the result. The first end-to-end milestone is **import source → understand dependencies → approve deployment → deploy → detect a fault → diagnose → approve a correction → execute → verify recovery**.

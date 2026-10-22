@@ -4,6 +4,7 @@ import {
   integer,
   jsonb,
   unique,
+  foreignKey,
   index,
 } from 'drizzle-orm/pg-core';
 import { appSchema } from './reserved.js';
@@ -35,9 +36,7 @@ export const runs = appSchema.table(
     workspaceId: text('workspace_id')
       .notNull()
       .references(() => workspaces.id, { onDelete: 'cascade' }),
-    projectId: text('project_id').references(() => projects.id, {
-      onDelete: 'set null',
-    }),
+    projectId: text('project_id'),
     type: text('type').notNull(),
     status: text('status').$type<RunStatus>().notNull().default('queued'),
     input: jsonb('input').$type<Record<string, unknown>>().notNull().default({}),
@@ -52,6 +51,16 @@ export const runs = appSchema.table(
   },
   (table) => [
     unique('runs_ws_id_unique').on(table.workspaceId, table.id),
+    // SQL-authoritative composite foreign key:
+    // Migration 0002 enforces `FOREIGN KEY (workspace_id, project_id) REFERENCES app.projects(workspace_id, id) ON DELETE SET NULL (project_id)`.
+    // Drizzle ORM 0.45 lacks support for PostgreSQL 15+ column-subset `ON DELETE SET NULL (columns)`.
+    // Calling `.onDelete('set null')` in Drizzle would incorrectly imply nulling both columns, violating NOT NULL on workspace_id.
+    // The migration SQL is the authoritative definition for the (project_id)-scoped SET NULL rule.
+    foreignKey({
+      columns: [table.workspaceId, table.projectId],
+      foreignColumns: [projects.workspaceId, projects.id],
+      name: 'runs_workspace_project_fkey',
+    }),
   ]
 );
 

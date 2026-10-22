@@ -11,3 +11,4 @@ export * from './event.js';
 export * from './capability.js';
 export * from './usage.js';
 export * from './workflow.js';
+export * from './deployment.js';

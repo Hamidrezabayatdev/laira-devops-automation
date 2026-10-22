@@ -199,7 +199,6 @@ describe('Database Multi-Tenant Integration Tests', () => {
     try {
       await client.query('BEGIN');
       const claimed = await claimOutboxBatch(client, 'worker-test-1', 100);
-      await client.query('COMMIT');
 
       const foundOutbox = claimed.find((item) => (item.payload as { runId?: string }).runId === run.id);
       expect(foundOutbox).toBeDefined();
@@ -207,19 +206,65 @@ describe('Database Multi-Tenant Integration Tests', () => {
 
       if (foundOutbox && foundOutbox.claimedAt) {
         const ok = await markOutboxDispatched(
-          pool,
+          client,
           foundOutbox.id,
           'worker-test-1',
           foundOutbox.claimedAt
         );
         expect(ok).toBe(true);
-        const check = await pool.query(`SELECT status FROM app.outbox WHERE id = $1`, [foundOutbox.id]);
+        const check = await client.query(`SELECT status FROM app.outbox WHERE id = $1`, [foundOutbox.id]);
         expect(check.rows[0].status).toBe('dispatched');
       }
+
+      await client.query('ROLLBACK');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
   });
+
+  it.skipIf(!testDbUrl)(
+    'uncommitted batch outbox claim rollback safely leaves items pending without stranding claims',
+    async () => {
+      const { workspace } = await getOrCreateOwnerWorkspace(pool, {
+        user: { id: `usr_${crypto.randomUUID().replace(/-/g, '')}`, name: 'Rollback Claim Owner' },
+        githubUserId: `gh_rollback_claim_${Date.now()}`,
+      });
+
+      const run = await createRun(pool, { workspaceId: workspace.id }, {
+        type: 'demo_fixture',
+      });
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const claimed = await claimOutboxBatch(client, 'test-rollback-worker', 100);
+        const found = claimed.find((item) => (item.payload as { runId?: string }).runId === run.id);
+        expect(found).toBeDefined();
+        expect(found?.status).toBe('claimed');
+
+        await client.query('ROLLBACK');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      const check = await pool.query(
+        `SELECT status, claimed_by, claimed_at FROM app.outbox WHERE payload->>'runId' = $1`,
+        [run.id]
+      );
+      expect(check.rows.length).toBe(1);
+      expect(check.rows[0].status).toBe('pending');
+      expect(check.rows[0].claimed_by).toBeNull();
+      expect(check.rows[0].claimed_at).toBeNull();
+
+      await pool.query(`DELETE FROM app.outbox WHERE payload->>'runId' = $1`, [run.id]);
+    }
+  );
 
   it.skipIf(!testDbUrl)('cancels a run and records a monotonic run_cancelled event', async () => {
     const { workspace } = await getOrCreateOwnerWorkspace(pool, {

@@ -20,13 +20,13 @@
  * 5. Safe summary output ONLY.
  */
 
-import { BoxApiClient } from '../boxapi/client.ts';
-import { s } from '../schema/validator.ts';
-import type { SafeToolDefinition } from '../boxapi/types.ts';
+import { BoxApiClient } from '../boxapi/client.js';
+import { s } from '../schema/validator.js';
+import type { SafeToolDefinition } from '../boxapi/types.js';
 import {
   BOXAPI_TOOL_CALL_RESPONSE,
   BOXAPI_STREAM_CHUNKS,
-} from '../fixtures/boxapi-fixtures.ts';
+} from '../fixtures/boxapi-fixtures.js';
 
 const appSummaryTool: SafeToolDefinition<{ app_slug: string }> = {
   name: 'get_app_summary',
@@ -50,6 +50,7 @@ function parseArgs(args: string[]) {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (!arg) continue;
     if (arg === '--api-key' || arg.startsWith('--api-key=')) {
       console.error(
         'SECURITY ERROR: Passing API keys in command-line arguments leaks credentials in system process listings (ps aux).'
@@ -63,7 +64,7 @@ function parseArgs(args: string[]) {
       flags.confirmLiveCall = true;
     } else if (arg === '--model' && args[i + 1]) {
       const candidateModel = args[++i];
-      if (!ALLOWED_MODELS.has(candidateModel)) {
+      if (!candidateModel || !ALLOWED_MODELS.has(candidateModel)) {
         console.error(
           `SECURITY ERROR: Unsupported or invalid model: "${candidateModel}". Allowed models: ${[...ALLOWED_MODELS].join(', ')}`
         );
@@ -80,6 +81,7 @@ export async function runSmokeCli(argv: string[] = process.argv.slice(2)): Promi
   // Security check for argv leaks and arbitrary model inputs
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (!arg) continue;
     if (arg === '--api-key' || arg.startsWith('--api-key=')) {
       console.error(
         'SECURITY ERROR: Passing API keys in command-line arguments leaks credentials in system process listings (ps aux).'
@@ -89,7 +91,7 @@ export async function runSmokeCli(argv: string[] = process.argv.slice(2)): Promi
     }
     if (arg === '--model' && argv[i + 1]) {
       const candidateModel = argv[i + 1];
-      if (!ALLOWED_MODELS.has(candidateModel)) {
+      if (!candidateModel || !ALLOWED_MODELS.has(candidateModel)) {
         console.error(
           `SECURITY ERROR: Unsupported or invalid model: "${candidateModel}". Allowed models: ${[...ALLOWED_MODELS].join(', ')}`
         );
@@ -188,12 +190,11 @@ export async function runSmokeCli(argv: string[] = process.argv.slice(2)): Promi
       maxTokens: maxTokensCap,
     });
 
-    if (!req1Result.toolCalls || req1Result.toolCalls.length === 0) {
+    const toolCall = req1Result.toolCalls?.[0];
+    if (!toolCall) {
       console.error('FAILED: Model did not produce a tool call.');
       return 1;
     }
-
-    const toolCall = req1Result.toolCalls[0];
     console.log(`✓ Model invoked tool: "${toolCall.name}"`);
     console.log(`  Arguments: ${JSON.stringify(toolCall.arguments)}`);
     console.log(`  Tokens: Prompt=${req1Result.usage.promptTokens}, Completion=${req1Result.usage.completionTokens}`);

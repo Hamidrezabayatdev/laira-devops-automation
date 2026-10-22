@@ -11,8 +11,12 @@
     "test": "vitest run -c vitest.config.ts"
   },
   "dependencies": {
+    "@laira/agent": "workspace:*",
     "@laira/db": "workspace:*",
+    "@laira/domain": "workspace:*",
+    "@laira/providers": "workspace:*",
     "@laira/security": "workspace:*",
+    "@laira/source": "workspace:*",
     "pg": "8.23.1",
     "pg-boss": "12.38.0",
     "zod": "3.24.2"

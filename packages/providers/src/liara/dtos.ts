@@ -1,4 +1,4 @@
-import type { SafeLiaraApp, SafeLiaraAppDetail, SafeLiaraRelease } from './types.ts';
+import type { SafeLiaraApp, SafeLiaraAppDetail, SafeLiaraRelease } from './types.js';
 
 const MAX_ID_LENGTH = 128;
 const MAX_SLUG_LENGTH = 64;

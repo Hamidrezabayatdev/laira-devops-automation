@@ -2,18 +2,18 @@
 
 A Persian-first technical colleague for Liara application owners: understand source, propose bounded changes, obtain approval, execute safely, and verify outcomes.
 
-**Implementation status: independently reviewed fixture-only foundation.** This is not a completed hackathon MVP or production deployment tool. The integrated review accepted the scoped foundation after correcting its material findings; clean-workspace install/build/typecheck/unit checks also passed. Live OAuth verification remains a separately recorded limitation. The original product brief and approved implementation plan are preserved in this repository. No infrastructure write tools are enabled in the foundation batch.
+**Implementation status: independently accepted deterministic agentic slice.** Authenticated assistant tasks, actual Deep Agents tooling, immutable public GitHub import, scoped credentials, explicit deployment proposals/approval and a separate deployment execution worker passed joined deterministic acceptance and independent review. This is not yet a verified live deployment tool or completed hackathon MVP. See [the walkthrough, exact evidence and limits](docs/assistant-product-slice.md). The original product brief and approved implementation plan remain preserved.
 
 ## Stack and process model
 
-Node 24, TypeScript, pnpm monorepo, Next.js/React, Auth.js GitHub OAuth, PostgreSQL/Drizzle, persistent pg-boss worker, private S3-compatible artifact storage. Shared typed contracts and security primitives are separate packages. Operational LangGraph workflows/checkpointing are a subsequent integration milestone—not provided merely by reserving a PostgreSQL schema.
+Node 24, TypeScript, pnpm monorepo, Next.js/React, Auth.js GitHub OAuth, PostgreSQL/Drizzle, persistent pg-boss worker, private S3-compatible artifact storage. Shared typed contracts and security primitives are separate packages. Deep Agents uses virtual in-memory state for bounded reasoning; durable runs, proposals and approvals use PostgreSQL. This slice does not provide PostgreSQL-resumable graph checkpoints.
 
 ## Setup
 
 1. Use Node 24 and the pnpm version pinned in `package.json`.
 2. Copy `.env.example` to `.env` only if it does not already exist. Configure local services, OAuth, and generated secrets; never commit `.env`.
 3. Follow [local setup](docs/local-setup.md) to start isolated PostgreSQL and object storage. Local DB port is configurable; this environment uses **55433**, leaving unrelated databases untouched.
-4. Install dependencies with `pnpm install`. The final lockfile and runnable commands are being integrated; see the status ledger before treating setup as verified.
+4. Install pinned dependencies with `pnpm install --frozen-lockfile`. The foundation passed a separate clean-workspace install/build/typecheck/unit check; see the status ledger for scope and remaining prerequisites.
 5. Do not supply production provider credentials to fixture UI or source build contexts.
 
 ### Checks
@@ -60,4 +60,4 @@ The documented Liara app-list request succeeded with the configured team scope a
 
 ## Next delivery milestone
 
-Integrate and independently verify the foundation, then implement static source import, the durable approval/dispatch/reconciliation broker, real approved deployment and deterministic monitoring. A real disposable-app demo must prove deployment revision, actual incident evidence and approved verified recovery. The required five-minute hackathon video and GitHub publication remain separate deliverables.
+The foundation and scoped source-inspection prerequisite are independently accepted. The current batch joins assistant → investigation tools → exact proposal → owner approval → separate deployment execution and release/HTTP checks for an existing app. Integrated checks and independent review passed for this deterministic batch. A real disposable-app demonstration still requires exact mutation/cost approval. Continuous monitoring, incident evidence and approved verified recovery remain later acceptance work, not implied by a deployment fixture. The five-minute hackathon video and GitHub publication remain separate deliverables.

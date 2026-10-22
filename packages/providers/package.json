@@ -3,20 +3,46 @@
   "version": "0.1.0",
   "description": "Safe provider adapters for Liara Cloud and BoxAPI Qwen3.7 Flash / GPT-5.4 Mini",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./liara": "./src/liara/index.ts",
-    "./boxapi": "./src/boxapi/index.ts",
-    "./schema": "./src/schema/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./liara": {
+      "types": "./dist/liara/index.d.ts",
+      "import": "./dist/liara/index.js",
+      "default": "./dist/liara/index.js"
+    },
+    "./liara/operational": {
+      "types": "./dist/liara/operational.d.ts",
+      "import": "./dist/liara/operational.js",
+      "default": "./dist/liara/operational.js"
+    },
+    "./boxapi": {
+      "types": "./dist/boxapi/index.d.ts",
+      "import": "./dist/boxapi/index.js",
+      "default": "./dist/boxapi/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js",
+      "default": "./dist/schema/index.js"
+    },
+    "./cli/smoke": {
+      "types": "./dist/cli/smoke.d.ts",
+      "import": "./dist/cli/smoke.js",
+      "default": "./dist/cli/smoke.js"
+    }
   },
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:vitest": "vitest run",
     "typecheck": "tsc --noEmit",
-    "smoke": "node --experimental-strip-types src/cli/smoke.ts"
+    "smoke": "node dist/cli/smoke.js"
   },
   "dependencies": {
     "openai": "4.86.1",

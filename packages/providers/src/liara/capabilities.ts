@@ -1,4 +1,4 @@
-import type { SafeLiaraCapability } from './types.ts';
+import type { SafeLiaraCapability } from './types.js';
 
 export function getLiaraCapabilities(): SafeLiaraCapability[] {
   return [

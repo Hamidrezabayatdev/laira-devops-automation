@@ -170,7 +170,7 @@ export class BoxApiOriginMismatchError extends Error {
 }
 
 export class BoxApiRedirectError extends BoxApiError {
-  constructor(targetUrl?: string) {
+  constructor(_targetUrl?: string) {
     super({
       code: 'BOXAPI_REDIRECT_BLOCKED',
       statusCode: 302,

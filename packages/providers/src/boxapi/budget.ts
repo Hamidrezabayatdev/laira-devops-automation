@@ -4,13 +4,13 @@ import {
   type IRunBudgetController,
   type IWorkspaceConcurrencyController,
   type IAiStopController,
-} from './types.ts';
+} from './types.js';
 import {
   RunBudgetExceededError,
   WorkspaceConcurrencyLimitExceededError,
   AiStoppedError,
   DemoOperatorKeyDeniedError,
-} from './errors.ts';
+} from './errors.js';
 
 /**
  * In-Memory Run Budget Controller.

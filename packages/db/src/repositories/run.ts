@@ -1,8 +1,20 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
+import { AppError } from '@laira/security';
 import type { RunStatus, RunErrorPayload } from '../schema/runs.js';
 import { validateSafeEventPayload } from '../schema/events.js';
 import type { WorkspaceScope } from './workspace.js';
+
+export class ProjectNotFoundError extends AppError {
+  constructor(_projectId?: string) {
+    super({
+      code: 'NOT_FOUND',
+      message: 'Project not found',
+      statusCode: 404,
+    });
+    this.name = 'ProjectNotFoundError';
+  }
+}
 
 export interface Run {
   id: string;
@@ -54,6 +66,17 @@ export async function createRun(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Validate project scoped in transaction BEFORE writing with safe typed notfound error
+    if (params.projectId !== undefined && params.projectId !== null) {
+      const projRes = await client.query(
+        `SELECT id FROM app.projects WHERE id = $1 AND workspace_id = $2 LIMIT 1`,
+        [params.projectId, workspace.workspaceId]
+      );
+      if (projRes.rows.length === 0) {
+        throw new ProjectNotFoundError(params.projectId);
+      }
+    }
 
     const runId = params.id || `run_${crypto.randomUUID().replace(/-/g, '')}`;
     const initialInput = params.input || {};

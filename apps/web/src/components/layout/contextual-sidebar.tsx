@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import {
   Server,
   Database,
@@ -70,6 +71,14 @@ export function ContextualSidebar({
       <nav className="flex flex-col gap-1 overflow-y-auto">
         {navItems.map((item) => {
           const Icon = item.icon;
+          if (item.id === 'settings' && !isDemo) {
+            return (
+              <Link key={item.id} href="/settings/connections" className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-zinc-400 hover:bg-[#23252D] hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-[#28c1f5]">
+                <Settings className="h-4 w-4" />
+                <span>اتصالات و کلیدهای سرویس</span>
+              </Link>
+            );
+          }
           const isCurrent = item.id === 'apps';
           const isImplemented = item.implemented;
           return (
@@ -132,7 +141,7 @@ export function ContextualSidebar({
               </Badge>
             </div>
             <p className="text-[10px] text-zinc-500 leading-relaxed">
-              داده مشاهده‌شده‌ای از سرویس‌های این فضای کاری موجود نیست. اتصال و جمع‌آوری زنده هنوز پیاده‌سازی نشده است.
+              داده مشاهده‌شده‌ای در این پنل موجود نیست. برای بررسی سرویس‌ها، اتصال خود را در تنظیمات ثبت کنید و از دستیار درخواست بررسی کنید.
             </p>
           </div>
         )}

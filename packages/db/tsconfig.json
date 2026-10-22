@@ -5,10 +5,12 @@
     "outDir": "./dist",
     "composite": true,
     "paths": {
+      "@laira/domain": ["../domain/src/index.ts"],
       "@laira/security": ["../security/src/index.ts"]
     }
   },
   "references": [
+    { "path": "../domain" },
     { "path": "../security" }
   ],
   "include": ["src/**/*"]

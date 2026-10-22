@@ -71,7 +71,7 @@ export class LiaraOriginMismatchError extends Error {
   readonly code = 'ORIGIN_MISMATCH';
   readonly safeMessage: string;
 
-  constructor(attemptedUrl?: string) {
+  constructor(_attemptedUrl?: string) {
     const message = `Liara adapter only connects to fixed origin https://api.liara.ir. Attempted URL violates fixed origin constraint.`;
     super(message);
     this.name = 'LiaraOriginMismatchError';

@@ -1,13 +1,13 @@
-import type { BoxApiStreamChunk, SafeToolCall, SafeToolDefinition } from './types.ts';
-import { calculateUsage } from './usage.ts';
-import { validateAndParseToolCall } from './tools.ts';
-import { InterruptedStreamError, ResponseSizeExceededError } from './errors.ts';
+import type { BoxApiStreamChunk, SafeToolCall, SafeToolDefinition } from './types.js';
+import { calculateUsage } from './usage.js';
+import { validateAndParseToolCall } from './tools.js';
+import { InterruptedStreamError, ResponseSizeExceededError } from './errors.js';
 
 export interface AccumulatedStreamResult {
   content: string;
   toolCalls?: SafeToolCall[];
   finishReason?: string;
-  usage?: import('./types.ts').ProviderUsageRecord;
+  usage?: import('./types.js').ProviderUsageRecord;
 }
 
 export interface ParseSseStreamOptions {

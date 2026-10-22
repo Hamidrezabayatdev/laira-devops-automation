@@ -1,0 +1,45 @@
+{
+  "name": "@laira/agent",
+  "version": "0.1.0",
+  "description": "DeepAgents harness and DevOps runtime adapter for Liara Cloud",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "import": "./dist/model.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@laira/providers": "workspace:*",
+    "@langchain/core": "1.2.14",
+    "@langchain/langgraph": "1.4.10",
+    "@langchain/langgraph-checkpoint": "1.1.5",
+    "deepagents": "1.15.1",
+    "langsmith": "0.7.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.8.2",
+    "vitest": "3.2.7"
+  }
+}

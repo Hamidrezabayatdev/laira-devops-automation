@@ -15,6 +15,7 @@
     "@fontsource-variable/vazirmatn": "5.3.0",
     "@fontsource/vazirmatn": "5.3.0",
     "@laira/db": "workspace:*",
+    "@laira/domain": "workspace:*",
     "@laira/security": "workspace:*",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",

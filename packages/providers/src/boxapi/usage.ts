@@ -1,4 +1,4 @@
-import { KNOWN_MODEL_CATALOG_RATES, type ProviderUsageRecord } from './types.ts';
+import { KNOWN_MODEL_CATALOG_RATES, type ProviderUsageRecord } from './types.js';
 
 export function calculateUsage(rawUsage: unknown, model: string): ProviderUsageRecord {
   const usage = (typeof rawUsage === 'object' && rawUsage !== null ? rawUsage : {}) as Record<string, unknown>;

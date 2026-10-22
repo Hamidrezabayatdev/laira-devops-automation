@@ -1,10 +1,17 @@
 import pg from 'pg';
 import { PgBoss, type Job } from 'pg-boss';
-import { getDatabasePool } from '@laira/db';
+import {
+  getDatabasePool,
+  resolveRunForExecution,
+  claimRunForExecution,
+  failRun,
+} from '@laira/db';
 import { WorkerConfig, loadWorkerConfig } from './config.js';
 import { WorkerHeartbeatManager } from './heartbeat.js';
 import { OutboxPoller, safeErrorMessage, BossDispatcher } from './outbox-poller.js';
 import { executeDemoFixtureRun } from './handlers/demo-fixture.js';
+import { executeAgentTaskRun } from './handlers/agent-task.js';
+import { executeApprovedAgentActionRun } from './handlers/approved-action.js';
 
 export class AppWorker {
   private pool: pg.Pool;
@@ -78,13 +85,58 @@ export class AppWorker {
           for (const job of jobs) {
             const runId = job.data.runId;
             try {
-              await executeDemoFixtureRun(
-                this.pool,
-                this.config.workerId,
-                runId,
-                this.config.runLeaseTimeoutSeconds,
-                this.config.fixtureStepDelayMs
-              );
+              const resolved = await resolveRunForExecution(this.pool, runId);
+              if (!resolved) {
+                console.error(
+                  `[Worker ${this.config.workerId}] Run ${runId} cannot be resolved from database`
+                );
+                continue;
+              }
+
+              const { run } = resolved;
+              switch (run.type) {
+                case 'demo_fixture':
+                  await executeDemoFixtureRun(
+                    this.pool,
+                    this.config.workerId,
+                    runId,
+                    this.config.runLeaseTimeoutSeconds,
+                    this.config.fixtureStepDelayMs
+                  );
+                  break;
+                case 'agent_task':
+                  await executeAgentTaskRun(
+                    this.pool,
+                    this.config.workerId,
+                    runId,
+                    this.config.runLeaseTimeoutSeconds
+                  );
+                  break;
+                case 'agent_action':
+                  await executeApprovedAgentActionRun(
+                    this.pool,
+                    this.config.workerId,
+                    runId,
+                    this.config.runLeaseTimeoutSeconds
+                  );
+                  break;
+                default: {
+                  console.error(
+                    `[Worker ${this.config.workerId}] Unknown run type for run ${runId}`
+                  );
+                  await claimRunForExecution(
+                    this.pool,
+                    this.config.workerId,
+                    runId,
+                    this.config.runLeaseTimeoutSeconds
+                  );
+                  await failRun(this.pool, this.config.workerId, runId, {
+                    code: 'UNKNOWN_RUN_TYPE',
+                    message: 'Unsupported run type',
+                  }).catch(() => {});
+                  break;
+                }
+              }
             } catch (err) {
               console.error(
                 `[Worker ${this.config.workerId}] Error executing run ${runId}: ${safeErrorMessage(err)}`

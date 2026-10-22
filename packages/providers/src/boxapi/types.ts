@@ -1,4 +1,4 @@
-import type { TypedValidator } from '../schema/validator.ts';
+import type { TypedValidator } from '../schema/validator.js';
 
 export const BOXAPI_ORIGIN = 'https://ai.boxapi.ir/ai/v1';
 export const DEFAULT_BOXAPI_MODEL = 'qwen/qwen3.7-flash';

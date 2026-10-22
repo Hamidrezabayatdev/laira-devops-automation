@@ -333,11 +333,13 @@ describe('Worker Fixture Handler & Recovery Tests', () => {
       try {
         await client.query('BEGIN');
         const claimed = await claimOutboxBatch(client, 'recovery_worker', 100, 30);
-        await client.query('COMMIT');
-
         const reclaimed = claimed.find((item) => item.id === outboxId);
         expect(reclaimed).toBeDefined();
         expect(reclaimed?.claimedBy).toBe('recovery_worker');
+        await client.query('ROLLBACK');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
         await pool.query(`DELETE FROM app.outbox WHERE id = $1`, [outboxId]);
@@ -462,6 +464,8 @@ describe('Worker Fixture Handler & Recovery Tests', () => {
         expect(checkInitial?.status).toBe('queued');
 
         // 2. Start real child worker process with stream draining
+        let childStarted = false;
+        let childOperational = false;
         child = spawn(process.execPath, [workerScriptPath], {
           cwd: path.resolve(__dirname, '..'),
           env: {
@@ -469,22 +473,42 @@ describe('Worker Fixture Handler & Recovery Tests', () => {
             WORKER_ID: uniqueWorkerId,
             DATABASE_URL: testDbUrl!, // Isolated test database ONLY
             TEST_FIXTURE_STEP_DELAY_MS: '0',
+            OUTBOX_INTERVAL_MS: '100',
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         });
 
+        child.stdout?.on('data', (d) => {
+          const str = d.toString();
+          if (str.includes('Starting')) childStarted = true;
+          if (str.includes('Worker fully operational')) childOperational = true;
+        });
         child.stdout?.resume();
         child.stderr?.resume();
 
         // 3. Poll until child worker picks up from outbox, executes via pg-boss, and marks succeeded
         let terminalStatus = '';
+        let lastStatus = '';
         for (let i = 0; i < 60; i++) {
           await new Promise((r) => setTimeout(r, 150));
           const check = await getRun(pool, { workspaceId: workspace.id }, run.id);
-          if (check && (check.status === 'succeeded' || check.status === 'failed')) {
-            terminalStatus = check.status;
-            break;
+          if (check) {
+            lastStatus = check.status;
+            if (check.status === 'succeeded' || check.status === 'failed') {
+              terminalStatus = check.status;
+              break;
+            }
           }
+        }
+
+        if (terminalStatus !== 'succeeded') {
+          const outboxRes = await pool.query(
+            `SELECT status, (claimed_by IS NOT NULL) AS is_claimed FROM app.outbox WHERE payload->>'runId' = $1`,
+            [run.id]
+          );
+          console.error(
+            `[diagnostic] offline child test failed: targetStatus=${lastStatus}, outboxStatus=${outboxRes.rows[0]?.status ?? 'missing'}, isClaimed=${outboxRes.rows[0]?.is_claimed ?? false}, childStarted=${childStarted}, childOperational=${childOperational}, childExitCode=${child.exitCode}, childSignal=${child.signalCode}`
+          );
         }
 
         expect(terminalStatus).toBe('succeeded');
@@ -552,6 +576,7 @@ describe('Worker Fixture Handler & Recovery Tests', () => {
             PGBOSS_EXPIRE_SECONDS: '2',
             PGBOSS_SUPERVISE_INTERVAL_SECONDS: '1',
             RUN_LEASE_TIMEOUT_SECONDS: '2',
+            OUTBOX_INTERVAL_MS: '100',
             TEST_FIXTURE_STEP_DELAY_MS: '2000',
           },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -591,6 +616,17 @@ describe('Worker Fixture Handler & Recovery Tests', () => {
             break;
           }
         }
+        if (!stepProgressEmitted) {
+          const state = await pool.query(
+            `SELECT r.status AS run_status, o.status AS outbox_status,
+                    j.state AS job_state, j.retry_count
+             FROM app.runs r
+             LEFT JOIN app.outbox o ON o.payload->>'runId' = r.id
+             LEFT JOIN pgboss.job j ON j.data->>'runId' = r.id AND j.name = 'run.execute'
+             WHERE r.id = $1`, [run.id]
+          );
+          console.error('[diagnostic] crash-test precondition:', JSON.stringify(state.rows));
+        }
         expect(stepProgressEmitted).toBe(true);
 
         // 3. Forcefully kill Worker A mid-execution (SIGKILL)
@@ -622,6 +658,7 @@ describe('Worker Fixture Handler & Recovery Tests', () => {
             PGBOSS_EXPIRE_SECONDS: '2',
             PGBOSS_SUPERVISE_INTERVAL_SECONDS: '1',
             RUN_LEASE_TIMEOUT_SECONDS: '2',
+            OUTBOX_INTERVAL_MS: '100',
             TEST_FIXTURE_STEP_DELAY_MS: '0',
           },
           stdio: ['ignore', 'pipe', 'pipe'],

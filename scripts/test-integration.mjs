@@ -14,7 +14,10 @@ const testEnv = { ...process.env, DATABASE_URL: process.env.TEST_DATABASE_URL };
 for (const name of ['BOX_API_KEY', 'BOXAPI_API_KEY', 'LIARA_API_TOKEN', 'AGENT_ROUTER_API_KEY', 'AUTH_GITHUB_SECRET', 'AUTH_SECRET', 'NEXTAUTH_SECRET', 'ENCRYPTION_MASTER_KEY']) {
   delete testEnv[name];
 }
-const result = spawnSync('pnpm', ['exec', 'vitest', 'run', ...args], {
+// These suites share one isolated database, global outbox and pg-boss queue.
+// Child workers must not consume another file's direct-handler fixture jobs.
+// Unit tests remain parallel; integration files run serially until each has its own DB.
+const result = spawnSync('pnpm', ['exec', 'vitest', 'run', '--no-file-parallelism', ...args], {
   stdio: 'inherit',
   env: testEnv,
 });

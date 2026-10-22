@@ -5,15 +5,15 @@ import {
   type SafeLiaraAppDetail,
   type SafeLiaraRelease,
   type SafeLiaraCapability,
-} from './types.ts';
+} from './types.js';
 import {
   LiaraApiError,
   CredentialedRedirectBlockedError,
   MutationBlockedInReadOnlyAdapterError,
   LiaraOriginMismatchError,
-} from './errors.ts';
-import { toSafeLiaraApp, toSafeLiaraAppDetail, toSafeLiaraRelease } from './dtos.ts';
-import { getLiaraCapabilities } from './capabilities.ts';
+} from './errors.js';
+import { toSafeLiaraApp, toSafeLiaraAppDetail, toSafeLiaraRelease } from './dtos.js';
+import { getLiaraCapabilities } from './capabilities.js';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_SIZE_BYTES = 1024 * 1024; // 1 MiB

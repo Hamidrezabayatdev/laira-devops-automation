@@ -1,3 +1,3 @@
-export * from './schema/index.ts';
-export * from './liara/index.ts';
-export * from './boxapi/index.ts';
+export * from './schema/index.js';
+export * from './liara/index.js';
+export * from './boxapi/index.js';

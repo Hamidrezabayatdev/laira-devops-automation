@@ -5,6 +5,8 @@ import {
 } from '@langchain/core/messages';
 import type { ChatResult, ChatGeneration } from '@langchain/core/outputs';
 import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
+import { isLangChainTool, convertToOpenAITool } from '@langchain/core/utils/function_calling';
+import { toJsonSchema } from '@langchain/core/utils/json_schema';
 import { BoxApiClient, TOKEN_BOUNDS, RUN_LIMITS } from '@laira/providers/boxapi';
 import type {
   ChatMessage,
@@ -130,38 +132,208 @@ export function mapLangChainMessagesToBoxApi(messages: BaseMessage[]): ChatMessa
 }
 
 /**
+ * Safely converts any schema representation (Zod v3, Zod v4, StandardSchema, or custom)
+ * to a standard plain JSON Schema object, preventing raw Zod internals from leaking.
+ *
+ * Enforces fail-closed static validation:
+ * - Truly schemaless tools (schema === undefined || schema === null) preserve empty default { type: 'object', properties: {} }
+ * - For provided schemas, conversion must produce a valid JSON Schema object without Zod internals (_def, def)
+ * - Fails closed with an Error instead of silently weakening or broadening to an empty schema
+ */
+export function convertSchemaToJsonSchema(schema: unknown): Record<string, unknown> {
+  if (schema === undefined || schema === null) {
+    return { type: 'object', properties: {} };
+  }
+
+  if (typeof schema !== 'object') {
+    throw new Error('Unsupported or invalid tool schema: schema must be an object or undefined');
+  }
+
+  // 1. If the object provides its own toJsonSchema() method (e.g. TypedValidator)
+  if (typeof (schema as any).toJsonSchema === 'function') {
+    try {
+      const res = (schema as any).toJsonSchema();
+      if (res && typeof res === 'object' && !('_def' in res) && !('def' in res)) {
+        return res as Record<string, unknown>;
+      }
+    } catch {
+      throw new Error('Unsupported or invalid tool schema: custom conversion failed');
+    }
+  }
+
+  // 2. LangChain toJsonSchema conversion (Zod v3, Zod v4, StandardSchema)
+  try {
+    const res = toJsonSchema(schema as any);
+    if (res && typeof res === 'object' && !('_def' in res) && !('def' in res)) {
+      if (
+        'type' in res ||
+        'properties' in res ||
+        '$ref' in res ||
+        'allOf' in res ||
+        'anyOf' in res ||
+        'oneOf' in res ||
+        Object.keys(res).length === 0
+      ) {
+        return res as Record<string, unknown>;
+      }
+    }
+  } catch {
+    // Fall back to inspect plain object
+  }
+
+  // 3. If already a valid plain JSON Schema without Zod internals
+  if (
+    ('type' in (schema as any) ||
+      'properties' in (schema as any) ||
+      '$ref' in (schema as any) ||
+      'allOf' in (schema as any) ||
+      'anyOf' in (schema as any) ||
+      'oneOf' in (schema as any)) &&
+    !('_def' in (schema as any)) &&
+    !('def' in (schema as any))
+  ) {
+    return schema as Record<string, unknown>;
+  }
+
+  // 4. Fail closed: never silently broaden or weaken invalid/unsupported provided schemas to empty objects
+  throw new Error(
+    'Unsupported or invalid tool schema: unable to convert to valid JSON Schema without leaking internal definition'
+  );
+}
+
+/**
  * Normalizes any tool object (LangChain DynamicStructuredTool, OpenAI tool, or AgentTool)
- * to a SafeToolDefinition expected by BoxApiClient.
+ * to a SafeToolDefinition expected by BoxApiClient with valid JSON Schema parameters.
+ *
+ * Guarantees:
+ * - Robust conversion for Zod v3 and Zod v4 schemas (including objects, pipes, transforms)
+ * - Preserves plain canonical JSON schemas unchanged
+ * - Never leaks Zod internals (_def, def) or weakens schemas to empty objects
+ * - Fails closed on unsupported / invalid provided schemas
+ * - Attaches safe validation callback when original schema provides safeParse
  */
 export function normalizeToSafeToolDefinition(tool: any): SafeToolDefinition {
-  if (tool.parameters && tool.name && tool.description) {
+  if (!tool || typeof tool !== 'object') {
     return {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
+      name: 'unnamed_tool',
+      description: '',
+      parameters: { type: 'object', properties: {} },
     };
   }
 
-  if (tool.schema && tool.name && tool.description) {
-    return {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.schema,
-    };
+  // 1. LangChain tool (DynamicStructuredTool, StructuredTool, DeepAgents builtin tool, etc.)
+  if (isLangChainTool(tool)) {
+    try {
+      const openAiTool = convertToOpenAITool(tool);
+      if (openAiTool && openAiTool.function) {
+        const anyTool = tool as any;
+        const rawSchema = anyTool.schema ?? anyTool.parameters;
+        const validator = anyTool.validator || (
+          rawSchema && typeof rawSchema.safeParse === 'function'
+            ? (rawArgs: unknown) => {
+                const res = rawSchema.safeParse(rawArgs);
+                if (res.success) return { success: true, data: res.data };
+                const errs = res.error?.issues
+                  ? res.error.issues.map((i: any) => `${i.path?.join('.') || 'field'}: ${i.message}`)
+                  : ['Validation failed'];
+                return { success: false, errors: errs };
+              }
+            : undefined
+        );
+
+        return {
+          name: openAiTool.function.name,
+          description: openAiTool.function.description || '',
+          parameters: convertSchemaToJsonSchema(openAiTool.function.parameters),
+          ...(validator ? { validator } : {}),
+        };
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes('Unsupported or invalid tool schema')) {
+        throw err;
+      }
+      // Fall through to manual extraction
+    }
   }
 
+  // 2. OpenAI formatted tool definition
   if (tool.type === 'function' && tool.function) {
+    const rawSchema = tool.function.parameters;
+    const validator = tool.validator || (
+      rawSchema && typeof rawSchema.safeParse === 'function'
+        ? (rawArgs: unknown) => {
+            const res = rawSchema.safeParse(rawArgs);
+            if (res.success) return { success: true, data: res.data };
+            const errs = res.error?.issues
+              ? res.error.issues.map((i: any) => `${i.path?.join('.') || 'field'}: ${i.message}`)
+              : ['Validation failed'];
+            return { success: false, errors: errs };
+          }
+        : undefined
+    );
+
     return {
       name: tool.function.name,
       description: tool.function.description || '',
-      parameters: tool.function.parameters || { type: 'object', properties: {} },
+      parameters: convertSchemaToJsonSchema(rawSchema),
+      ...(validator ? { validator } : {}),
     };
   }
 
+  // 3. Tool with schema field (e.g. AgentTool or custom tool object)
+  if ('schema' in tool && tool.name) {
+    const rawSchema = tool.schema;
+    const validator = tool.validator || (
+      rawSchema && typeof rawSchema.safeParse === 'function'
+        ? (rawArgs: unknown) => {
+            const res = rawSchema.safeParse(rawArgs);
+            if (res.success) return { success: true, data: res.data };
+            const errs = res.error?.issues
+              ? res.error.issues.map((i: any) => `${i.path?.join('.') || 'field'}: ${i.message}`)
+              : ['Validation failed'];
+            return { success: false, errors: errs };
+          }
+        : undefined
+    );
+
+    return {
+      name: tool.name,
+      description: tool.description || '',
+      parameters: convertSchemaToJsonSchema(rawSchema),
+      ...(validator ? { validator } : {}),
+    };
+  }
+
+  // 4. Tool with parameters field (e.g. SafeToolDefinition)
+  if ('parameters' in tool && tool.name) {
+    const rawSchema = tool.parameters;
+    const validator = tool.validator || (
+      rawSchema && typeof rawSchema.safeParse === 'function'
+        ? (rawArgs: unknown) => {
+            const res = rawSchema.safeParse(rawArgs);
+            if (res.success) return { success: true, data: res.data };
+            const errs = res.error?.issues
+              ? res.error.issues.map((i: any) => `${i.path?.join('.') || 'field'}: ${i.message}`)
+              : ['Validation failed'];
+            return { success: false, errors: errs };
+          }
+        : undefined
+    );
+
+    return {
+      name: tool.name,
+      description: tool.description || '',
+      parameters: convertSchemaToJsonSchema(rawSchema),
+      ...(validator ? { validator } : {}),
+    };
+  }
+
+  // 5. Fallback for unnamed / unspecified tools
   return {
     name: tool.name || 'unnamed_tool',
     description: tool.description || '',
     parameters: { type: 'object', properties: {} },
+    ...(tool.validator ? { validator: tool.validator } : {}),
   };
 }
 

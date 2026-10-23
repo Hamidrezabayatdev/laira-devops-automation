@@ -66,6 +66,7 @@ function resolveDrizzleAdapter(): Adapter | undefined {
 }
 
 export const authConfig: NextAuthConfig = {
+  trustHost: true,
   adapter: resolveDrizzleAdapter(),
   session: {
     strategy: 'database',

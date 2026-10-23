@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { ImportRuntimeEnvironmentResult } from '../runtime-environment.js';
+import type { MonitorCliResult } from './monitor.js';
 
 export interface GitHubUser {
   id: string; // numeric string e.g. "152868728"
@@ -79,6 +80,7 @@ export interface SafeCreateAppProposal extends SafeProposalBase {
   platform: string;
   planId: string;
   bundlePlanId: string;
+  networkId: string;
   cost: {
     currency: 'IRR';
     hourly: number;
@@ -132,7 +134,7 @@ export interface ApproveResult {
 }
 
 export interface CliExecutionResult {
-  command: 'task' | 'status' | 'connect-liara' | 'approve' | 'import-environment' | 'help';
-  data?: TaskResult | StatusResult | ConnectLiaraResult | ApproveResult | ImportRuntimeEnvironmentResult;
+  command: 'task' | 'status' | 'connect-liara' | 'approve' | 'import-environment' | 'monitor' | 'help';
+  data?: TaskResult | StatusResult | ConnectLiaraResult | ApproveResult | ImportRuntimeEnvironmentResult | MonitorCliResult;
   message: string;
 }

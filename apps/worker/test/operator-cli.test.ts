@@ -135,6 +135,37 @@ describe('Product Operator CLI Unit & Contract Tests', () => {
         'staging-liara',
       ]);
       expect(parsedConnShort.options.n).toBe('staging-liara');
+
+      const parsedMonitor = parseCliArgs([
+        'monitor',
+        '--action',
+        'register',
+        '--connection',
+        'conn_xyz',
+        '--app',
+        'my-app',
+        '--path',
+        '/api/health',
+        '--interval',
+        '60',
+      ]);
+      expect(parsedMonitor.command).toBe('monitor');
+      expect(parsedMonitor.options.action).toBe('register');
+      expect(parsedMonitor.options.connection).toBe('conn_xyz');
+      expect(parsedMonitor.options.app).toBe('my-app');
+      expect(parsedMonitor.options.path).toBe('/api/health');
+      expect(parsedMonitor.options.interval).toBe('60');
+
+      const parsedMonitorShort = parseCliArgs([
+        'monitor',
+        '-a',
+        'check',
+        '-m',
+        'mon_123',
+      ]);
+      expect(parsedMonitorShort.command).toBe('monitor');
+      expect(parsedMonitorShort.options.a).toBe('check');
+      expect(parsedMonitorShort.options.m).toBe('mon_123');
     });
   });
 
@@ -670,6 +701,41 @@ describe('Product Operator CLI Unit & Contract Tests', () => {
         )
       ).rejects.toThrow('Connection name cannot be empty');
     });
+
+    it('dispatches monitor command, rejects invalid actions before execution, and defaults omitted action to status', async () => {
+      const mockDeps: OperatorCliDependencies = {
+        env: {
+          GH_TOKEN: 'valid-token',
+          DEMO_OWNER_GITHUB_ID: DEMO_OPERATOR_ID,
+          ENCRYPTION_MASTER_KEY: TEST_MASTER_KEY,
+        },
+        fetchFn: createMockFetch(),
+      };
+
+      // 1. Explicit invalid action rejected before handler call
+      await expect(
+        runOperatorCli(['monitor', '--action', 'invalid_action'], mockDeps)
+      ).rejects.toThrow('Invalid monitor action. Must be one of: register, check, status, pause, resume');
+
+      // 2. Explicit blank action rejected (not defaulted to status)
+      await expect(
+        runOperatorCli(['monitor', '--action='], mockDeps)
+      ).rejects.toThrow('Invalid monitor action. Must be one of: register, check, status, pause, resume');
+
+      await expect(
+        runOperatorCli(['monitor', '-a', '  '], mockDeps)
+      ).rejects.toThrow('Invalid monitor action. Must be one of: register, check, status, pause, resume');
+
+      // 3. Omitted action defaults to 'status' and proceeds to handler (fails closed on missing DB/auth without throwing action error)
+      await expect(
+        runOperatorCli(['monitor'], mockDeps)
+      ).rejects.toThrow(/DATABASE_URL environment variable is required/);
+
+      // 4. Action check / status / pause / resume with --monitor flag
+      await expect(
+        runOperatorCli(['monitor', '--action', 'check', '--monitor', 'mon_123'], mockDeps)
+      ).rejects.toThrow(/DATABASE_URL environment variable is required/);
+    });
   });
 
   describe('9. CLI Entrypoint Error Formatting & Redaction', () => {
@@ -801,10 +867,24 @@ describe('Product Operator CLI DB Integration Tests', () => {
   it.skipIf(!testDbUrl)(
     'connect-liara stores encrypted credential and refuses overwrite on customer connection',
     async () => {
+      const uniqueOperatorId = '152868729';
       const { deps, stdoutLogs } = createIntegrationDeps({
         env: {
+          DEMO_OWNER_GITHUB_ID: uniqueOperatorId,
           LIARA_TEAM_ID: 'team-acme-123',
         },
+        fetchFn: vi.fn().mockImplementation(() =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: Number(uniqueOperatorId),
+                login: 'unique-operator-user',
+                name: 'Unique Operator',
+              }),
+              { status: 200 }
+            )
+          )
+        ),
       });
 
       const res = await executeConnectLiaraCommand(undefined, deps);
@@ -1351,6 +1431,7 @@ describe('Product Operator CLI DB Integration Tests', () => {
         platform: 'node',
         planId: 'standard-base-g2',
         bundlePlanId: 'standard-bundle-g2',
+        networkId: '6ad9be2707e024287d1bc47a',
         cost: {
           currency: 'IRR',
           hourly: 20486.1,
@@ -1398,6 +1479,7 @@ describe('Product Operator CLI DB Integration Tests', () => {
       if (statusRes.proposal?.kind === 'create_app') {
         expect(statusRes.proposal.planId).toBe('standard-base-g2');
         expect(statusRes.proposal.bundlePlanId).toBe('standard-bundle-g2');
+        expect(statusRes.proposal.networkId).toBe('6ad9be2707e024287d1bc47a');
         expect(statusRes.proposal.cost).toBeDefined();
         expect(statusRes.proposal.cost.currency).toBe('IRR');
         expect(statusRes.proposal.cost.hourly).toBe(20486.1);

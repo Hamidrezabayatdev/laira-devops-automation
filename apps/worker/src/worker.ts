@@ -12,12 +12,14 @@ import { OutboxPoller, safeErrorMessage, BossDispatcher } from './outbox-poller.
 import { executeDemoFixtureRun } from './handlers/demo-fixture.js';
 import { executeAgentTaskRun } from './handlers/agent-task.js';
 import { executeApprovedAgentActionRun } from './handlers/approved-action.js';
+import { AppMonitorService } from './app-monitor.js';
 
 export class AppWorker {
   private pool: pg.Pool;
   private config: WorkerConfig;
   private heartbeat: WorkerHeartbeatManager;
   private outboxPoller: OutboxPoller | null = null;
+  private monitorService: AppMonitorService | null = null;
   private boss: PgBoss | null = null;
   private isRunning = false;
   private isStarting = false;
@@ -154,6 +156,10 @@ export class AppWorker {
       // 5. Start worker heartbeat pulse ONLY when queues, handler and poller are fully ready
       await this.heartbeat.start();
 
+      // 6. Start deterministic app monitoring service
+      this.monitorService = new AppMonitorService(this.pool);
+      this.monitorService.start();
+
       this.isRunning = true;
       console.log(
         `[Worker ${this.config.workerId}] Worker fully operational. Heartbeat and queue active.`
@@ -183,6 +189,12 @@ export class AppWorker {
 
     console.log(`[Worker ${this.config.workerId}] Graceful shutdown initiated...`);
     this.isRunning = false;
+
+    // 0. Stop deterministic app monitoring service
+    if (this.monitorService) {
+      await this.monitorService.stop();
+      this.monitorService = null;
+    }
 
     // 1. Stop outbox poller
     if (this.outboxPoller) {

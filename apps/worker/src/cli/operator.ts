@@ -7,6 +7,7 @@ import {
   executeApproveCommand,
 } from './commands.js';
 import { executeImportEnvironmentCommand } from './import-environment.js';
+import { executeMonitorCommand, type MonitorCommandArgs } from './monitor.js';
 import { AppError } from '@laira/security';
 import type {
   CliExecutionResult,
@@ -85,6 +86,7 @@ Usage:
   operator status --run <runId>
   operator connect-liara [--team-id <teamId>] [--name <name>]
   operator import-environment --name <name> --file <path> --keys <key1,key2>
+  operator monitor [--action <register|check|status|pause|resume>] [--connection <id>] [--app <slug>] [--path <path>] [--interval <sec>] [--monitor <id>]
   operator approve --run <runId> --hash <proposalHash>
   operator --help
 
@@ -111,6 +113,15 @@ Commands:
                     -n, --name                  Connection name for the imported environment
                     -f, --file                  Local path to .env file (<= 64 KiB, no symlinks)
                     -k, --keys                  Comma-separated allowlist of environment variable keys
+
+  monitor         Manage persistent application health monitoring.
+                  Options:
+                    -a, --action                Action: register, check, status, pause, resume (default: status)
+                    -c, --connection            Connection ID
+                    --app                       Application slug or ID
+                    -p, --path                  Health check path (e.g. /api/health)
+                    -i, --interval              Health check interval in seconds
+                    -m, --monitor               Monitor ID
 
   approve         Explicitly approve a proposed deployment, create_app, or restart action.
                   Options:
@@ -166,6 +177,8 @@ export function formatCliError(err: unknown): string {
       'Connection name cannot be empty',
       'Connection name exceeds maximum length',
       'Connection name contains invalid characters',
+      'Invalid monitor action',
+      'Action is required',
       'Unknown command',
       'Connection name is required',
       'Environment file path is required',
@@ -283,6 +296,56 @@ export async function runOperatorCli(
         command: 'import-environment',
         data,
         message: data.connectionId,
+      };
+    }
+
+    case 'monitor': {
+      const rawAction = options.action ?? options.a;
+      let action: MonitorCommandArgs['action'];
+      if (rawAction === undefined) {
+        action = 'status';
+      } else {
+        const trimmed = rawAction.trim();
+        if (
+          trimmed === 'register' ||
+          trimmed === 'check' ||
+          trimmed === 'status' ||
+          trimmed === 'pause' ||
+          trimmed === 'resume'
+        ) {
+          action = trimmed;
+        } else {
+          throw new Error('Invalid monitor action. Must be one of: register, check, status, pause, resume');
+        }
+      }
+
+      const connectionId =
+        options.connection ?? options['connection-id'] ?? options.connectionId ?? options.c ?? undefined;
+      const app =
+        options.app ?? options['app-id'] ?? options.appId ?? options['app-slug'] ?? options.appSlug ?? undefined;
+      const path =
+        options.path ?? options.p ?? undefined;
+      const interval =
+        options.interval ?? options.i ?? undefined;
+      const monitorId =
+        options.monitor ?? options['monitor-id'] ?? options.monitorId ?? options.m ?? undefined;
+
+      const data = await executeMonitorCommand(
+        {
+          action,
+          connectionId: connectionId !== undefined ? connectionId.trim() : undefined,
+          appId: app !== undefined ? app.trim() : undefined,
+          appSlug: app !== undefined ? app.trim() : undefined,
+          path: path !== undefined ? path.trim() : undefined,
+          interval: interval !== undefined ? interval.trim() : undefined,
+          monitorId: monitorId !== undefined ? monitorId.trim() : undefined,
+        },
+        deps
+      );
+      return {
+        command: 'monitor',
+        data,
+        message: data.monitor?.id || data.action,
       };
     }
 

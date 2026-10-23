@@ -337,6 +337,7 @@ export async function executeStatusCommand(
                 platform: p.platform,
                 planId: p.planId,
                 bundlePlanId: p.bundlePlanId,
+                networkId: p.networkId,
                 cost: {
                   currency: p.cost.currency,
                   hourly: p.cost.hourly,

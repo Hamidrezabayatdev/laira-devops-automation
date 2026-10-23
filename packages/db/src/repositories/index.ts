@@ -39,3 +39,4 @@ export {
   type ApprovedAgentAction,
   type ClaimDispatchOptions,
 } from './agent-action.js';
+export * from './app-monitor.js';

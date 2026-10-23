@@ -57,7 +57,22 @@ The deploy proposal/hash binds this reference/version; the model cannot select o
 
 ## Paid app creation catalog
 
-The app-creation capability uses `LIARA_APPROVED_APP_PLANS_JSON`, a server-supplied JSON array, not model-invented pricing. Leave it empty to disable provisioning. Each entry contains `planId`, `bundlePlanId`, optional `platform`, and `cost: { currency: "IRR", hourly, monthly, sourceUrl, checkedAt }`. The operator must verify account-valid resource and feature-bundle IDs and their total costs first, freeze them into a proposal, review its exact hash, and only then approve it. The deployment catalog is restricted to the configured demo owner; it must not silently become another tenant's catalog. Catalog prices are estimates, not invoices; recurring charges may continue after testing unless the resource is explicitly stopped/deleted through an authorized path.
+The app-creation capability uses `LIARA_APPROVED_APP_PLANS_JSON`, a server-supplied JSON array, not model-invented pricing. Leave it empty to disable provisioning. Each entry contains `planId`, `bundlePlanId`, an explicit account-valid `networkId`, optional `platform`, and `cost: { currency: "IRR", hourly, monthly, sourceUrl, checkedAt }`. The operator must verify account-valid resource and feature-bundle IDs and their total costs first, freeze them into a proposal, review its exact hash, and only then approve it. The deployment catalog is restricted to the configured demo owner; it must not silently become another tenant's catalog. Catalog prices are estimates, not invoices; recurring charges may continue after testing unless the resource is explicitly stopped/deleted through an authorized path.
+
+## Deterministic app monitoring
+
+After verifying the application is deployed, register its default Liara endpoint:
+
+```sh
+node --env-file=.env apps/worker/dist/cli/operator.js monitor --action register \
+  --connection CONNECTION_ID --app APP_SLUG --path /api/health --interval 60
+node --env-file=.env apps/worker/dist/cli/operator.js monitor --action status --monitor MONITOR_ID
+node --env-file=.env apps/worker/dist/cli/operator.js monitor --action check --monitor MONITOR_ID
+node --env-file=.env apps/worker/dist/cli/operator.js monitor --action pause --monitor MONITOR_ID
+node --env-file=.env apps/worker/dist/cli/operator.js monitor --action resume --monitor MONITOR_ID
+```
+
+Only `/` and `/api/health` on the validated app's fixed `https://APP_SLUG.liara.run` origin are supported. Redirects fail health checks. The persistent worker schedules checks without model calls; three consecutive failures open one persisted incident. Three consecutive HTTP successes plus confirmed current-release `READY` evidence resolve it. Missing provider evidence remains unconfirmed. Current limitation: the app-detail DTO does not yet preserve an explicit current-release identity, so production incident recovery stays unconfirmed rather than trusting release-history ordering. Pause persists across worker restarts; already-dispatched requests may finish, but their cleared lease prevents stale state updates. Recovery mutations still require a separate exact-hash approval.
 
 ## Evidence and limits
 

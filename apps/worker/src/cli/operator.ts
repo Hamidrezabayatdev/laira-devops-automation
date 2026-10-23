@@ -81,9 +81,9 @@ const USAGE_HELP = `
 Laira Product Operator CLI
 
 Usage:
-  operator task --repository <url> --task <description> [--environment-connection <id>] [--environment-version <version>]
+  operator task --repository <url> --task <description> [--connection <id>] [--environment-connection <id>] [--environment-version <version>]
   operator status --run <runId>
-  operator connect-liara [--team-id <teamId>]
+  operator connect-liara [--team-id <teamId>] [--name <name>]
   operator import-environment --name <name> --file <path> --keys <key1,key2>
   operator approve --run <runId> --hash <proposalHash>
   operator --help
@@ -93,6 +93,7 @@ Commands:
                   Options:
                     -r, --repository            Public GitHub repository URL (https://github.com/owner/repo)
                     -t, --task                  Task instructions for the DevOps agent
+                    -c, --connection            Optional Liara connection ID
                     --environment-connection    Optional environment connection ID
                     --environment-version       Optional environment credential version (positive integer)
 
@@ -103,6 +104,7 @@ Commands:
   connect-liara   Securely store Liara API token from LIARA_API_TOKEN environment variable.
                   Options:
                     -t, --team-id               Optional Liara team ID
+                    -n, --name                  Optional connection name
 
   import-environment  Securely import allowlisted environment secrets into the workspace.
                   Options:
@@ -154,6 +156,16 @@ export function formatCliError(err: unknown): string {
       'LIARA_API_TOKEN environment variable is required',
       'ENCRYPTION_MASTER_KEY environment variable is required',
       'Existing Liara connection already configured',
+      'Existing connection already exists with name',
+      'Connection not found in workspace',
+      'Connection provider must be "liara"',
+      'Connection is not eligible',
+      'Connection credential version record not found',
+      'Connection active version must be a positive integer',
+      'Connection ID cannot be empty',
+      'Connection name cannot be empty',
+      'Connection name exceeds maximum length',
+      'Connection name contains invalid characters',
       'Unknown command',
       'Connection name is required',
       'Environment file path is required',
@@ -201,12 +213,14 @@ export async function runOperatorCli(
 
   switch (command) {
     case 'task': {
-      const repository = options.repository || options.r || '';
-      const task = options.task || options.t || '';
+      const repository = options.repository ?? options.r ?? '';
+      const task = options.task ?? options.t ?? '';
+      const connectionId =
+        options.connection ?? options['connection-id'] ?? options.connectionId ?? options.c ?? undefined;
       const envConnection =
-        options['environment-connection'] || options.environmentConnection || undefined;
+        options['environment-connection'] ?? options.environmentConnection ?? undefined;
       const envVersionRaw =
-        options['environment-version'] || options.environmentVersion || undefined;
+        options['environment-version'] ?? options.environmentVersion ?? undefined;
 
       let environmentCredentialVersion: number | undefined = undefined;
       if (envVersionRaw !== undefined) {
@@ -220,7 +234,8 @@ export async function runOperatorCli(
         {
           repository,
           task,
-          environmentConnectionId: envConnection?.trim(),
+          connectionId: connectionId !== undefined ? connectionId.trim() : undefined,
+          environmentConnectionId: envConnection !== undefined ? envConnection.trim() : undefined,
           environmentCredentialVersion,
         },
         deps
@@ -233,7 +248,7 @@ export async function runOperatorCli(
     }
 
     case 'status': {
-      const run = options.run || options.r || '';
+      const run = options.run ?? options.r ?? '';
       const data = await executeStatusCommand({ run }, deps);
       return {
         command: 'status',
@@ -243,8 +258,15 @@ export async function runOperatorCli(
     }
 
     case 'connect-liara': {
-      const teamId = options['team-id'] || options.teamId || options.t || undefined;
-      const data = await executeConnectLiaraCommand({ teamId }, deps);
+      const teamId = options['team-id'] ?? options.teamId ?? options.t ?? undefined;
+      const name = options.name ?? options.n ?? undefined;
+      const data = await executeConnectLiaraCommand(
+        {
+          teamId: teamId !== undefined ? teamId.trim() : undefined,
+          name: name !== undefined ? name.trim() : undefined,
+        },
+        deps
+      );
       return {
         command: 'connect-liara',
         data,

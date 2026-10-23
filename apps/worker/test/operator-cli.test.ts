@@ -93,6 +93,49 @@ describe('Product Operator CLI Unit & Contract Tests', () => {
       expect(parsed.options['environment-connection']).toBe('conn_xyz');
       expect(parsed.options['environment-version']).toBe('2');
     });
+
+    it('parses --connection and --name flags correctly', () => {
+      const parsedTask = parseCliArgs([
+        'task',
+        '--repository',
+        'https://github.com/org/repo',
+        '--task',
+        'Deploy project',
+        '--connection',
+        'conn_custom123',
+      ]);
+      expect(parsedTask.command).toBe('task');
+      expect(parsedTask.options.connection).toBe('conn_custom123');
+
+      const parsedShort = parseCliArgs([
+        'task',
+        '-r',
+        'https://github.com/org/repo',
+        '-t',
+        'Deploy',
+        '-c',
+        'conn_short123',
+      ]);
+      expect(parsedShort.options.c).toBe('conn_short123');
+
+      const parsedConn = parseCliArgs([
+        'connect-liara',
+        '--name',
+        'production-liara',
+        '--team-id',
+        'team-456',
+      ]);
+      expect(parsedConn.command).toBe('connect-liara');
+      expect(parsedConn.options.name).toBe('production-liara');
+      expect(parsedConn.options['team-id']).toBe('team-456');
+
+      const parsedConnShort = parseCliArgs([
+        'connect-liara',
+        '-n',
+        'staging-liara',
+      ]);
+      expect(parsedConnShort.options.n).toBe('staging-liara');
+    });
   });
 
   describe('2. GitHub Token Resolution', () => {
@@ -451,6 +494,24 @@ describe('Product Operator CLI Unit & Contract Tests', () => {
         })
       ).rejects.toThrow('Environment credential version must be a positive integer');
     });
+
+    it('rejects explicit defined blank connectionId and does not silently fall back to autodiscovery', async () => {
+      await expect(
+        executeTaskCommand({
+          repository: 'https://github.com/org/repo',
+          task: 'Deploy with empty connection',
+          connectionId: '',
+        })
+      ).rejects.toThrow('Connection ID cannot be empty');
+
+      await expect(
+        executeTaskCommand({
+          repository: 'https://github.com/org/repo',
+          task: 'Deploy with whitespace connection',
+          connectionId: '   ',
+        })
+      ).rejects.toThrow('Connection ID cannot be empty');
+    });
   });
 
   describe('6. Approve Command Validation', () => {
@@ -494,6 +555,32 @@ describe('Product Operator CLI Unit & Contract Tests', () => {
           env: { LIARA_API_TOKEN: 'liara-token' },
         })
       ).rejects.toThrow('ENCRYPTION_MASTER_KEY environment variable is required');
+    });
+
+    it('rejects invalid or empty connection name when explicit name is provided', async () => {
+      await expect(
+        executeConnectLiaraCommand(
+          { name: '   ' },
+          {
+            env: {
+              LIARA_API_TOKEN: 'liara-token',
+              ENCRYPTION_MASTER_KEY: TEST_MASTER_KEY,
+            },
+          }
+        )
+      ).rejects.toThrow('Connection name cannot be empty');
+
+      await expect(
+        executeConnectLiaraCommand(
+          { name: 'bad@char!' },
+          {
+            env: {
+              LIARA_API_TOKEN: 'liara-token',
+              ENCRYPTION_MASTER_KEY: TEST_MASTER_KEY,
+            },
+          }
+        )
+      ).rejects.toThrow('Connection name contains invalid characters');
     });
   });
 
@@ -549,6 +636,39 @@ describe('Product Operator CLI Unit & Contract Tests', () => {
           mockDeps
         )
       ).rejects.toThrow('Environment keys allowlist is required');
+    });
+
+    it('rejects explicit blank --connection and --name flags without silent autodiscovery or default fallback', async () => {
+      const mockDeps: OperatorCliDependencies = {
+        env: {
+          GH_TOKEN: 'valid-token',
+          DEMO_OWNER_GITHUB_ID: DEMO_OPERATOR_ID,
+          LIARA_API_TOKEN: 'liara-token',
+          ENCRYPTION_MASTER_KEY: TEST_MASTER_KEY,
+        },
+        fetchFn: createMockFetch(),
+      };
+
+      await expect(
+        runOperatorCli(
+          [
+            'task',
+            '--repository',
+            'https://github.com/org/repo',
+            '--task',
+            'Deploy with empty connection',
+            '--connection=',
+          ],
+          mockDeps
+        )
+      ).rejects.toThrow('Connection ID cannot be empty');
+
+      await expect(
+        runOperatorCli(
+          ['connect-liara', '--name='],
+          mockDeps
+        )
+      ).rejects.toThrow('Connection name cannot be empty');
     });
   });
 
@@ -708,6 +828,329 @@ describe('Product Operator CLI DB Integration Tests', () => {
       ).rejects.toThrow(
         'Existing Liara connection already configured for this workspace. Refusing to overwrite customer connection.'
       );
+    }
+  );
+
+  it.skipIf(!testDbUrl)(
+    'connect-liara with explicit --name allows coexistence with existing fixture connections, returns new id, and rejects duplicate name',
+    async () => {
+      const customOperatorId = '152868799';
+      const { deps } = createIntegrationDeps({
+        env: {
+          DEMO_OWNER_GITHUB_ID: customOperatorId,
+        },
+        fetchFn: vi.fn().mockImplementation(() =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: Number(customOperatorId),
+                login: 'fixture-operator',
+                name: 'Fixture Operator',
+              }),
+              { status: 200 }
+            )
+          )
+        ),
+      });
+
+      const { workspace } = await getOrCreateOwnerWorkspace(pool, {
+        user: { id: customOperatorId, name: 'Fixture Operator' },
+        githubUserId: customOperatorId,
+      });
+      trackedWorkspaceIds.add(workspace.id);
+
+      // Existing connection labeled 'test tenant old fixture' must NOT be overwritten or adopted
+      const oldFixtureConn = await createConnection(
+        pool,
+        { workspaceId: workspace.id },
+        {
+          name: 'test tenant old fixture',
+          provider: 'liara',
+          status: 'active',
+          activeVersion: 1,
+        }
+      );
+
+      // Verify default invocation refuses when ANY liara connection exists
+      await expect(
+        executeConnectLiaraCommand(undefined, deps)
+      ).rejects.toThrow(
+        'Existing Liara connection already configured for this workspace. Refusing to overwrite customer connection.'
+      );
+
+      // Explicit --name allows NEW connection in the same workspace without adopting or overwriting
+      const explicitRes = await executeConnectLiaraCommand({ name: 'tenant-secondary-liara' }, deps);
+
+      expect(explicitRes.connectionId).toMatch(/^conn_/);
+      expect(explicitRes.connectionId).not.toBe(oldFixtureConn.id);
+      expect(explicitRes.status).toBe('configured_unverified');
+
+      // Verify both connections coexist in database: old fixture is not overwritten or adopted
+      const conns = await pool.query(
+        `SELECT id, name, provider, status, active_version FROM app.connections
+         WHERE workspace_id = $1 ORDER BY created_at ASC`,
+        [workspace.id]
+      );
+      expect(conns.rows.length).toBe(2);
+      expect(conns.rows[0].id).toBe(oldFixtureConn.id);
+      expect(conns.rows[0].name).toBe('test tenant old fixture');
+      expect(conns.rows[1].id).toBe(explicitRes.connectionId);
+      expect(conns.rows[1].name).toBe('tenant-secondary-liara');
+
+      // Verify credential was stored for the new connection
+      const cred = await pool.query(
+        `SELECT id, version FROM app.connection_credential_versions
+         WHERE workspace_id = $1 AND connection_id = $2`,
+        [workspace.id, explicitRes.connectionId]
+      );
+      expect(cred.rows.length).toBe(1);
+      expect(cred.rows[0].version).toBe(1);
+
+      // Duplicate invocation with the SAME explicit name MUST fail
+      await expect(
+        executeConnectLiaraCommand({ name: 'tenant-secondary-liara' }, deps)
+      ).rejects.toThrow(
+        'Existing Liara connection already configured with name "tenant-secondary-liara". Refusing to overwrite connection.'
+      );
+
+      // Default invocation STILL refuses because Liara connections exist
+      await expect(
+        executeConnectLiaraCommand(undefined, deps)
+      ).rejects.toThrow(
+        'Existing Liara connection already configured for this workspace. Refusing to overwrite customer connection.'
+      );
+    }
+  );
+
+  it.skipIf(!testDbUrl)(
+    'task command with optional --connection validates owner scope, provider, status, credential existence, and sets input.connectionId',
+    async () => {
+      const taskOperatorId = '152868798';
+      const { deps } = createIntegrationDeps({
+        env: {
+          DEMO_OWNER_GITHUB_ID: taskOperatorId,
+        },
+        fetchFn: vi.fn().mockImplementation(() =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: Number(taskOperatorId),
+                login: 'task-operator',
+                name: 'Task Operator',
+              }),
+              { status: 200 }
+            )
+          )
+        ),
+      });
+
+      // Setup a valid Liara connection in operator workspace
+      const liaraConn = await executeConnectLiaraCommand({ name: 'task-target-liara' }, deps);
+      trackedWorkspaceIds.add(liaraConn.workspaceId);
+
+      // 1. Valid explicit connection queues agent task with exact input.connectionId
+      const taskRes = await executeTaskCommand(
+        {
+          repository: 'https://github.com/octocat/Hello-World',
+          task: 'Deploy using explicit connection',
+          connectionId: liaraConn.connectionId,
+        },
+        deps
+      );
+
+      const runRow = await pool.query(
+        `SELECT id, input FROM app.runs WHERE id = $1 LIMIT 1`,
+        [taskRes.runId]
+      );
+      expect(runRow.rows[0].input.connectionId).toBe(liaraConn.connectionId);
+
+      // 2. Default task without connection keeps default behavior (input.connectionId is undefined)
+      const defaultTaskRes = await executeTaskCommand(
+        {
+          repository: 'https://github.com/octocat/Hello-World',
+          task: 'Deploy using default connection discovery',
+        },
+        deps
+      );
+      const defaultRunRow = await pool.query(
+        `SELECT id, input FROM app.runs WHERE id = $1 LIMIT 1`,
+        [defaultTaskRes.runId]
+      );
+      expect(defaultRunRow.rows[0].input.connectionId).toBeUndefined();
+
+      // 3. Cross-scope connection: connection belonging to a different workspace is rejected
+      const { workspace: otherWs } = await getOrCreateOwnerWorkspace(pool, {
+        user: { id: '987654321', name: 'Foreign Operator' },
+        githubUserId: '987654321',
+      });
+      trackedWorkspaceIds.add(otherWs.id);
+
+      const foreignConn = await createConnection(
+        pool,
+        { workspaceId: otherWs.id },
+        {
+          name: 'foreign-conn',
+          provider: 'liara',
+          status: 'active',
+          activeVersion: 1,
+        }
+      );
+
+      await expect(
+        executeTaskCommand(
+          {
+            repository: 'https://github.com/octocat/Hello-World',
+            task: 'Deploy with foreign connection',
+            connectionId: foreignConn.id,
+          },
+          deps
+        )
+      ).rejects.toThrow('Connection not found in workspace');
+
+      // 4. Non-existent connection is rejected
+      await expect(
+        executeTaskCommand(
+          {
+            repository: 'https://github.com/octocat/Hello-World',
+            task: 'Deploy with nonexistent connection',
+            connectionId: 'conn_nonexistent_123',
+          },
+          deps
+        )
+      ).rejects.toThrow('Connection not found in workspace');
+
+      // 5. Connection with non-liara provider is rejected
+      const envConn = await createConnection(
+        pool,
+        { workspaceId: liaraConn.workspaceId },
+        {
+          name: 'runtime-env-conn',
+          provider: 'deployment_env',
+          status: 'active',
+          activeVersion: 1,
+        }
+      );
+      await expect(
+        executeTaskCommand(
+          {
+            repository: 'https://github.com/octocat/Hello-World',
+            task: 'Deploy with env provider connection',
+            connectionId: envConn.id,
+          },
+          deps
+        )
+      ).rejects.toThrow('Connection provider must be "liara"');
+
+      // 6. Ineligible status connection (e.g. revoked) is rejected
+      const revokedConn = await createConnection(
+        pool,
+        { workspaceId: liaraConn.workspaceId },
+        {
+          name: 'revoked-conn',
+          provider: 'liara',
+          status: 'revoked',
+          activeVersion: 1,
+        }
+      );
+      await pool.query(
+        `UPDATE app.connections SET status = 'revoked' WHERE id = $1`,
+        [revokedConn.id]
+      );
+      await expect(
+        executeTaskCommand(
+          {
+            repository: 'https://github.com/octocat/Hello-World',
+            task: 'Deploy with revoked connection',
+            connectionId: revokedConn.id,
+          },
+          deps
+        )
+      ).rejects.toThrow('Connection is not eligible for resolution');
+
+      // 7. Missing credential version record in app.connection_credential_versions is rejected
+      const noCredConn = await createConnection(
+        pool,
+        { workspaceId: liaraConn.workspaceId },
+        {
+          name: 'no-cred-conn',
+          provider: 'liara',
+          status: 'active',
+          activeVersion: 1,
+        }
+      );
+      await expect(
+        executeTaskCommand(
+          {
+            repository: 'https://github.com/octocat/Hello-World',
+            task: 'Deploy with connection lacking credential version',
+            connectionId: noCredConn.id,
+          },
+          deps
+        )
+      ).rejects.toThrow('Connection credential version record not found');
+
+      // 8. Non-positive integer active_version is rejected
+      const invalidVerConn = await createConnection(
+        pool,
+        { workspaceId: liaraConn.workspaceId },
+        {
+          name: 'invalid-ver-conn',
+          provider: 'liara',
+          status: 'active',
+          activeVersion: 1,
+        }
+      );
+      await pool.query(
+        `UPDATE app.connections SET active_version = 0 WHERE id = $1`,
+        [invalidVerConn.id]
+      );
+      await expect(
+        executeTaskCommand(
+          {
+            repository: 'https://github.com/octocat/Hello-World',
+            task: 'Deploy with invalid active version connection',
+            connectionId: invalidVerConn.id,
+          },
+          deps
+        )
+      ).rejects.toThrow('Connection active version must be a positive integer');
+    }
+  );
+
+  it.skipIf(!testDbUrl)(
+    'CLI dispatcher supports --name for connect-liara and --connection for task end-to-end',
+    async () => {
+      const { deps, stdoutLogs } = createIntegrationDeps();
+
+      const connectCliRes = await runOperatorCli(
+        ['connect-liara', '--name', 'e2e-named-liara'],
+        deps
+      );
+      expect(connectCliRes.command).toBe('connect-liara');
+      const connId = connectCliRes.message;
+      expect(connId).toMatch(/^conn_/);
+      trackedWorkspaceIds.add((connectCliRes.data as any).workspaceId);
+
+      const taskCliRes = await runOperatorCli(
+        [
+          'task',
+          '--repository',
+          'https://github.com/octocat/Hello-World',
+          '--task',
+          'Verify CLI dispatching with explicit connection',
+          '--connection',
+          connId,
+        ],
+        deps
+      );
+      expect(taskCliRes.command).toBe('task');
+      expect(taskCliRes.message).toMatch(/^run_/);
+
+      const runRow = await pool.query(
+        `SELECT input FROM app.runs WHERE id = $1 LIMIT 1`,
+        [taskCliRes.message]
+      );
+      expect(runRow.rows[0].input.connectionId).toBe(connId);
     }
   );
 

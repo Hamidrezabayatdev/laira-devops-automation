@@ -1,4 +1,10 @@
-# Live product journey — 2026-10-23 (code accepted; live entry blocked)
+# Live product journey — 2026-10-23 (live execution resumed)
+
+## Resumed owner session
+
+Owner restored GitHub authentication; authenticated `/user` again returned numeric ID `152868728`. Imported the four explicit runtime-readiness keys into encrypted runtime connection `conn_3c10c544613242dab92f7e08bbed1e35`, version 1 (values not printed). Account plan/bundle availability and estimate rechecked at `2026-10-23T07:14:28.703Z`: `standard-base-g2` + `basic`, combined 3,194.44 tomans/hour. Existing workspace Liara connection is an older test connection; import correctly refused to overwrite it. Adding explicit named new-connection and task-selection support before queuing the live task. No paid mutation dispatched at this point.
+
+Named live Liara connection imported as `conn_d83bafa7ceda41a3951d985d8cc92260`, leaving the prior test connection unchanged. First real durable agent task `run_4fbc93b418604601aab583d35dfa6546` failed before tool execution. Live diagnosis isolated model HTTP 400 to raw Zod v4 schemas for DeepAgents built-in tools; a direct JSON-schema tool request succeeded (133 tokens). A focused schema-normalization fix is in progress. No provider error bodies or credentials were printed.
 
 ## Authority and scope
 

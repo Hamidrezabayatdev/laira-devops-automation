@@ -24,6 +24,7 @@ export interface OperatorCliDependencies {
 export interface TaskArgs {
   repository: string;
   task: string;
+  connectionId?: string;
   environmentConnectionId?: string;
   environmentCredentialVersion?: number;
 }
@@ -108,6 +109,7 @@ export interface StatusResult {
 
 export interface ConnectLiaraArgs {
   teamId?: string;
+  name?: string;
 }
 
 export interface ConnectLiaraResult {

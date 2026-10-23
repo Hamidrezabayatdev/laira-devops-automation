@@ -13,6 +13,7 @@ import {
   DeploymentProposalSchema,
   hashDeploymentProposal,
 } from '@laira/domain';
+import { validateConnectionName } from '../runtime-environment.js';
 import { authenticateOperator } from './auth.js';
 import { resolveDatabasePool, resolveOperatorWorkspace } from './db.js';
 import type {
@@ -54,6 +55,12 @@ export async function executeTaskCommand(
     throw new Error('Repository URL is required (--repository)');
   }
 
+  if (args.connectionId !== undefined) {
+    if (typeof args.connectionId !== 'string' || !args.connectionId.trim()) {
+      throw new Error('Connection ID cannot be empty');
+    }
+  }
+
   const hasEnvConn = Boolean(args.environmentConnectionId?.trim());
   const hasEnvVer = args.environmentCredentialVersion !== undefined;
 
@@ -86,6 +93,52 @@ export async function executeTaskCommand(
     const { workspace } = await resolveOperatorWorkspace(managedPool.pool, user);
 
     let runtimeEnvironment: { connectionId: string; credentialVersion: number } | undefined = undefined;
+
+    const hasConnection = args.connectionId !== undefined;
+    if (hasConnection) {
+      const connId = args.connectionId!.trim();
+
+      // Owner-scoped DB metadata precheck BEFORE queueing:
+      // provider must be 'liara', connection belongs to workspace, status eligible, active_version credential exists
+      const connRes = await managedPool.pool.query(
+        `SELECT id, workspace_id, provider, status, active_version
+         FROM app.connections
+         WHERE id = $1 AND workspace_id = $2
+         LIMIT 1`,
+        [connId, workspace.id]
+      );
+
+      if (!connRes.rows || connRes.rows.length === 0) {
+        throw new Error('Connection not found in workspace');
+      }
+
+      const conn = connRes.rows[0];
+      if (conn.provider !== 'liara') {
+        throw new Error('Connection provider must be "liara"');
+      }
+
+      const ELIGIBLE_STATUSES = new Set(['active', 'configured_unverified']);
+      if (!ELIGIBLE_STATUSES.has(conn.status)) {
+        throw new Error('Connection is not eligible for resolution');
+      }
+
+      const activeVer = Number(conn.active_version);
+      if (!Number.isInteger(activeVer) || activeVer <= 0) {
+        throw new Error('Connection active version must be a positive integer');
+      }
+
+      const credRes = await managedPool.pool.query(
+        `SELECT id
+         FROM app.connection_credential_versions
+         WHERE workspace_id = $1 AND connection_id = $2 AND version = $3
+         LIMIT 1`,
+        [workspace.id, connId, activeVer]
+      );
+
+      if (!credRes.rows || credRes.rows.length === 0) {
+        throw new Error('Connection credential version record not found');
+      }
+    }
 
     if (hasEnvConn && hasEnvVer) {
       const connId = args.environmentConnectionId!.trim();
@@ -150,6 +203,7 @@ export async function executeTaskCommand(
             repo: coords.repo,
             ...(coords.ref ? { ref: coords.ref } : {}),
           },
+          ...(hasConnection ? { connectionId: args.connectionId!.trim() } : {}),
           ...(runtimeEnvironment ? { runtimeEnvironment } : {}),
         },
         initialMessage: 'CLI operator queued agent task',
@@ -390,6 +444,10 @@ export async function executeConnectLiaraCommand(
   }
 
   const teamId = args?.teamId?.trim() || env.LIARA_TEAM_ID?.trim() || undefined;
+  const hasExplicitName = args?.name !== undefined && args.name !== null;
+  const connectionName = hasExplicitName
+    ? validateConnectionName(args.name)
+    : 'Operator Import';
 
   const user = await authenticateOperator(deps);
   const managedPool = resolveDatabasePool(deps);
@@ -401,18 +459,43 @@ export async function executeConnectLiaraCommand(
     client = await managedPool.pool.connect();
     await client.query('BEGIN');
 
-    // Refuse to overwrite existing customer connection in this workspace
-    const existingRes = await client.query(
-      `SELECT id FROM app.connections
-       WHERE workspace_id = $1 AND provider = 'liara'
-       LIMIT 1`,
-      [workspace.id]
-    );
+    // Concurrency protection: transaction advisory lock per workspace/name prevents races
+    const lockKey = crypto
+      .createHash('sha256')
+      .update(`liara_conn:${workspace.id}:${connectionName}`)
+      .digest()
+      .readBigInt64BE(0)
+      .toString();
+    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [lockKey]);
 
-    if (existingRes.rows.length > 0) {
-      throw new Error(
-        'Existing Liara connection already configured for this workspace. Refusing to overwrite customer connection.'
+    if (hasExplicitName) {
+      // Explicit name: allow new connection if workspace name is unused; never overwrite
+      const existingRes = await client.query(
+        `SELECT id FROM app.connections
+         WHERE workspace_id = $1 AND name = $2
+         LIMIT 1`,
+        [workspace.id, connectionName]
       );
+
+      if (existingRes.rows.length > 0) {
+        throw new Error(
+          `Existing Liara connection already configured with name "${connectionName}". Refusing to overwrite connection.`
+        );
+      }
+    } else {
+      // Default: preserve refusal when any existing Liara connection exists for this workspace
+      const existingRes = await client.query(
+        `SELECT id FROM app.connections
+         WHERE workspace_id = $1 AND provider = 'liara'
+         LIMIT 1`,
+        [workspace.id]
+      );
+
+      if (existingRes.rows.length > 0) {
+        throw new Error(
+          'Existing Liara connection already configured for this workspace. Refusing to overwrite customer connection.'
+        );
+      }
     }
 
     const connectionId = `conn_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -437,7 +520,7 @@ export async function executeConnectLiaraCommand(
     await client.query(
       `INSERT INTO app.connections (id, workspace_id, name, provider, status, active_version, created_at, updated_at)
        VALUES ($1, $2, $3, 'liara', 'configured_unverified', 1, NOW(), NOW())`,
-      [connectionId, workspace.id, 'Operator Import']
+      [connectionId, workspace.id, connectionName]
     );
 
     // Store encrypted credential version

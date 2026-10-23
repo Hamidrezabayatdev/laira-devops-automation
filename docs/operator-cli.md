@@ -53,7 +53,7 @@ node --env-file=.env apps/worker/dist/cli/operator.js task \
 
 The deploy proposal/hash binds this reference/version; the model cannot select or replace it. The executor resolves values only for the approved release request and checks status/version again after source upload. Do not put values in task text. This capability's fixture acceptance does not prove that the target's live runtime is ready.
 
-`connect-liara` refuses to replace an existing workspace connection. The imported Liara token and optional team scope are stored together in an encrypted version-bound credential; they are never included in proposals or CLI output. Imported credentials remain `configured_unverified` until real provider reads establish usability. A missing/invalid team scope must not be silently replaced with a global worker team setting.
+`connect-liara` refuses to replace an existing workspace connection. To add a separate connection deliberately, supply `--name UNIQUE_NAME`; duplicate names are rejected under a transaction lock. Select it explicitly on a task with `--connection CONNECTION_ID`. Explicit blank selectors are rejected rather than falling back to discovery. The imported Liara token and optional team scope are stored together in an encrypted version-bound credential; they are never included in proposals or CLI output. Imported credentials remain `configured_unverified` until real provider reads establish usability. A missing/invalid team scope must not be silently replaced with a global worker team setting.
 
 ## Paid app creation catalog
 

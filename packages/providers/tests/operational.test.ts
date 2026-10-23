@@ -425,6 +425,241 @@ describe('Liara Operational & Observation Adapter', () => {
     });
   });
 
+  it('maps build.location and platformConfig.mirror in createRelease POST body to match CLI deploy.js', async () => {
+    let capturedBodyJson: any = null;
+
+    const mockFetch: typeof fetch = async (input, init) => {
+      capturedBodyJson = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ releaseID: 'rel-build-config-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    // Test with build: { location: 'germany' } and platformConfig: { mirror: false }
+    const outcome = await adapter.createRelease(
+      {
+        appSlug: 'my-web-app',
+        sourceId: 'source-uuid-789',
+        platform: 'next',
+        port: 3000,
+        build: { location: 'germany' },
+        platformConfig: { mirror: false },
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(outcome.status, 'accepted');
+    assert.deepStrictEqual(capturedBodyJson.build, { location: 'germany' });
+    assert.deepStrictEqual(capturedBodyJson.platformConfig, { mirror: false });
+    assert.strictEqual(capturedBodyJson.type, 'next');
+    assert.strictEqual(capturedBodyJson.port, 3000);
+
+    // Also test with buildLocation directly
+    const outcome2 = await adapter.createRelease(
+      {
+        appSlug: 'my-web-app',
+        sourceId: 'source-uuid-789',
+        buildLocation: 'iran',
+        platformConfig: { mirror: true },
+      },
+      validAuthority
+    );
+    assert.strictEqual(outcome2.status, 'accepted');
+    assert.deepStrictEqual(capturedBodyJson.build, { location: 'iran' });
+    assert.deepStrictEqual(capturedBodyJson.platformConfig, { mirror: true });
+  });
+
+  it('preserves undefined build and platformConfig when omitted in createRelease', async () => {
+    let capturedBodyJson: any = null;
+
+    const mockFetch: typeof fetch = async (input, init) => {
+      capturedBodyJson = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ releaseID: 'rel-default-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    await adapter.createRelease(
+      {
+        appSlug: 'my-web-app',
+        sourceId: 'source-uuid-789',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual('build' in capturedBodyJson, false);
+    assert.strictEqual('platformConfig' in capturedBodyJson, false);
+  });
+
+  it('rejects invalid buildLocation and non-allowlisted platformConfig keys in createRelease', async () => {
+    const adapter = new LiaraOperationalAdapter({ apiKey: 'test-token' });
+
+    await assert.rejects(
+      async () => {
+        await adapter.createRelease(
+          {
+            appSlug: 'my-web-app',
+            sourceId: 'source-uuid-789',
+            buildLocation: 'invalid-zone' as any,
+          },
+          validAuthority
+        );
+      },
+      { message: 'Invalid build location: must be iran or germany' }
+    );
+
+    await assert.rejects(
+      async () => {
+        await adapter.createRelease(
+          {
+            appSlug: 'my-web-app',
+            sourceId: 'source-uuid-789',
+            platformConfig: { mirror: false, maliciousCmd: 'touch /tmp/pwned' } as any,
+          },
+          validAuthority
+        );
+      },
+      { message: 'Invalid platformConfig key: maliciousCmd' }
+    );
+
+    await assert.rejects(
+      async () => {
+        await adapter.createRelease(
+          {
+            appSlug: 'my-web-app',
+            sourceId: 'source-uuid-789',
+            platformConfig: { mirror: 'not-boolean' as any },
+          },
+          validAuthority
+        );
+      },
+      { message: 'platformConfig.mirror must be a boolean' }
+    );
+  });
+
+  it('retrieves bounded diagnostic build logs via getBuildLogs with strict redaction and allowlists', async () => {
+    let capturedUrl = '';
+    const secretApiKey = 'test-token-super-secret-xyz';
+    const canaryToken = 'CANARY_SECRET_BUILD_123';
+    const canaryDbUrl = 'postgres://canary_user:canary_pass@10.0.0.1:5432/proddb';
+    const canaryPassword = 'password="untrusted_pwd_789"';
+
+    const mockFetch: typeof fetch = async (input) => {
+      capturedUrl = input.toString();
+      return new Response(
+        JSON.stringify({
+          release: { state: 'FAILED' },
+          buildOutput: [
+            {
+              stream: 'stdout',
+              line: `Using Liara mirror to install with ${secretApiKey} and ${canaryToken}`,
+              createdAt: '2026-10-23T10:00:00Z',
+            },
+            {
+              stream: 'STDERR',
+              line: `Build failed with ${canaryDbUrl} and ${canaryPassword}`,
+              createdAt: '2026-10-23T10:00:01Z',
+            },
+            {
+              stream: 'INSECURE_INTERNAL_SOCKET',
+              line: 'Build completed cleanly',
+              createdAt: 'invalid-non-iso-date-string',
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: secretApiKey,
+      fetchFn: mockFetch,
+    });
+
+    const logs = await adapter.getBuildLogs('rel-fail-1', { maxLines: 50 });
+    assert.strictEqual(capturedUrl, 'https://api.liara.ir/v2/releases/rel-fail-1/build-logs');
+    assert.strictEqual(logs.state, 'FAILED');
+    assert.strictEqual(logs.lines.length, 3);
+
+    // 1. Secret literals must be strictly absent
+    const allLinesCombined = logs.lines.map((l) => l.line).join('\n');
+    assert.strictEqual(allLinesCombined.includes(secretApiKey), false, 'apiKey must not be present');
+    assert.strictEqual(allLinesCombined.includes(canaryToken), false, 'canary token must not be present');
+    assert.strictEqual(allLinesCombined.includes(canaryDbUrl), false, 'database url must not be present');
+    assert.strictEqual(allLinesCombined.includes('untrusted_pwd_789'), false, 'password must not be present');
+
+    assert.strictEqual(logs.lines[0].line.includes('[REDACTED_API_KEY]'), true);
+    assert.strictEqual(logs.lines[0].line.includes('[REDACTED_SECRET]'), true);
+    assert.strictEqual(logs.lines[1].line.includes('[REDACTED_DATABASE_URL]'), true);
+    assert.strictEqual(logs.lines[1].line.includes('password=[REDACTED]'), true);
+
+    // 2. Stream allowlist: STDOUT / STDERR / unknown
+    assert.strictEqual(logs.lines[0].stream, 'STDOUT');
+    assert.strictEqual(logs.lines[1].stream, 'STDERR');
+    assert.strictEqual(logs.lines[2].stream, 'unknown');
+
+    // 3. createdAt validation: ISO string or empty string
+    assert.strictEqual(logs.lines[0].createdAt, '2026-10-23T10:00:00.000Z');
+    assert.strictEqual(logs.lines[1].createdAt, '2026-10-23T10:00:01.000Z');
+    assert.strictEqual(logs.lines[2].createdAt, '');
+
+    assert.strictEqual(logs.truncated, false);
+  });
+
+  it('enforces releaseState allowlist and maxLines finite integer bounds in getBuildLogs', async () => {
+    const mockFetch: typeof fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          release: { state: 'ARBITRARY_INTERNAL_EXEC_DATA' },
+          buildOutput: [
+            { stream: 'STDOUT', line: 'line 1', createdAt: '2026-10-23T10:00:00Z' },
+            { stream: 'STDOUT', line: 'line 2', createdAt: '2026-10-23T10:00:01Z' },
+            { stream: 'STDOUT', line: 'line 3', createdAt: '2026-10-23T10:00:02Z' },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    // Unknown state falls back to UNKNOWN
+    const logsUnknownState = await adapter.getBuildLogs('rel-fail-1', { maxLines: 2 });
+    assert.strictEqual(logsUnknownState.state, 'UNKNOWN');
+    assert.strictEqual(logsUnknownState.lines.length, 2);
+    assert.strictEqual(logsUnknownState.truncated, true);
+
+    // Handles NaN/Infinity options gracefully by clamping or defaulting
+    const logsNaN = await adapter.getBuildLogs('rel-fail-1', { maxLines: Number.NaN });
+    assert.strictEqual(logsNaN.lines.length, 3);
+    assert.strictEqual(logsNaN.truncated, false);
+
+    const logsInfinity = await adapter.getBuildLogs('rel-fail-1', { maxLines: Number.POSITIVE_INFINITY });
+    assert.strictEqual(logsInfinity.lines.length, 3);
+    assert.strictEqual(logsInfinity.truncated, false);
+  });
+
   it('refuses runtimeEnvs in proposeCreateRelease with static message and prevents leaks', () => {
     const adapter = new LiaraOperationalAdapter({ apiKey: 'test-token' });
 

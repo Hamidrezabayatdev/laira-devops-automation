@@ -69,6 +69,10 @@ export interface SafeDeployProposal extends SafeProposalBase {
     connectionId: string;
     credentialVersion: number;
   };
+  buildLocation?: 'iran' | 'germany';
+  platformConfig?: {
+    mirror?: boolean;
+  };
 }
 
 export interface SafeRestartProposal extends SafeProposalBase {

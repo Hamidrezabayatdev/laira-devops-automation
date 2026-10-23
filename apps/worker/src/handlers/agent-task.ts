@@ -42,12 +42,15 @@ import {
   LiaraPlatformSchema,
   ApprovedAppPlanSchema,
   RuntimeEnvironmentReferenceSchema,
+  parseInspectedLiaraConfig,
   type DeployProposal,
   type RestartProposal,
   type CreateAppProposal,
   type DeploymentProposal,
   type ApprovedAppPlan,
   type RuntimeEnvironmentReference,
+  type BuildLocation,
+  type PlatformConfig,
 } from '@laira/domain';
 import { parseLiaraDecryptedCredential } from './liara-credential.js';
 import type {
@@ -935,6 +938,23 @@ export async function executeAgentTaskRun(
             }
           }
 
+          // Extract source config strictly from inspected repository files (never from model tool args!)
+          let inspectedBuildLocation: BuildLocation | undefined;
+          let inspectedPlatformConfig: PlatformConfig | undefined;
+
+          if (currentInventory?.files) {
+            const inspectedConfig = parseInspectedLiaraConfig(currentInventory.files);
+            if (inspectedConfig?.buildLocation) {
+              inspectedBuildLocation = inspectedConfig.buildLocation;
+            }
+            if (
+              (args.platform === 'next' || args.platform === 'node') &&
+              inspectedConfig?.platformConfigs?.[args.platform]
+            ) {
+              inspectedPlatformConfig = inspectedConfig.platformConfigs[args.platform];
+            }
+          }
+
           const rawProposal = {
             kind: 'deploy' as const,
             connectionId: activeConnectionId,
@@ -949,6 +969,8 @@ export async function executeAgentTaskRun(
             },
             bundleDigest: currentBundle.bundleDigest,
             ...(validatedRuntimeEnvironmentRef ? { runtimeEnvironment: validatedRuntimeEnvironmentRef } : {}),
+            ...(inspectedBuildLocation ? { buildLocation: inspectedBuildLocation } : {}),
+            ...(inspectedPlatformConfig ? { platformConfig: inspectedPlatformConfig } : {}),
           };
 
           let validatedProposal: DeployProposal;
@@ -975,6 +997,8 @@ export async function executeAgentTaskRun(
               port: validatedProposal.port,
               commitSha: validatedProposal.repository.commitSha,
               bundleDigest: validatedProposal.bundleDigest,
+              ...(validatedProposal.buildLocation ? { buildLocation: validatedProposal.buildLocation } : {}),
+              ...(validatedProposal.platformConfig ? { platformConfig: validatedProposal.platformConfig } : {}),
             },
           };
         },

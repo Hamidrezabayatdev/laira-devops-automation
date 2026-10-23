@@ -1644,6 +1644,223 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
         const expectedHash = hashDeploymentProposal(completedOutput.proposedAction);
         expect(completedOutput.proposalHash).toBe(expectedHash);
       });
+
+      it('propose_deployment binds build.location and platformConfig strictly from inspected liara.json', async () => {
+        let runStatus = 'queued';
+        let completedOutput: any = null;
+
+        const mockLiaraEncrypted = encryptCredential(
+          JSON.stringify({ apiKey: 'mock-liara-key' }),
+          TEST_ENCRYPTION_KEY,
+          { workspaceId: 'ws-bld-test', connectionId: 'conn-liara-1', version: '1', keyVersion: 1 }
+        );
+
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-source-cfg-1',
+                  workspace_id: 'ws-bld-test',
+                  status: runStatus,
+                  claimed_by: runStatus === 'running' ? 'worker-test' : null,
+                  type: 'agent_task',
+                  input: {
+                    repository: 'https://github.com/acme/next-app',
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            runStatus = 'running';
+            return {
+              rows: [
+                {
+                  id: 'run-source-cfg-1',
+                  workspace_id: 'ws-bld-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {
+                    repository: 'https://github.com/acme/next-app',
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'succeeded'")) {
+            runStatus = 'succeeded';
+            completedOutput = params
+              ? (typeof params[0] === 'string' ? JSON.parse(params[0]) : params[0])
+              : null;
+            return {
+              rows: [
+                {
+                  id: 'run-source-cfg-1',
+                  workspace_id: 'ws-bld-test',
+                  status: 'succeeded',
+                  type: 'agent_task',
+                  output: completedOutput,
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('heartbeat_at = NOW()')) {
+            return {
+              rows: [
+                {
+                  id: 'run-source-cfg-1',
+                  workspace_id: 'ws-bld-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return { rows: [{ id: 'ws-bld-test', github_user_id: 'gh-test-owner' }] };
+          }
+          if (sql.includes('FROM app.connections')) {
+            return {
+              rows: [
+                {
+                  id: 'conn-liara-1',
+                  workspace_id: 'ws-bld-test',
+                  name: 'Liara',
+                  provider: 'liara',
+                  status: 'active',
+                  active_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connection_credential_versions')) {
+            return {
+              rows: [
+                {
+                  id: 'cred-1',
+                  workspace_id: 'ws-bld-test',
+                  connection_id: 'conn-liara-1',
+                  version: 1,
+                  algorithm: 'aes-256-gcm',
+                  ciphertext: mockLiaraEncrypted.ciphertext,
+                  iv: mockLiaraEncrypted.iv,
+                  tag: mockLiaraEncrypted.tag,
+                  key_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('SELECT COALESCE(MAX(seq), 0) + 1')) {
+            return { rows: [{ next_seq: 1 }] };
+          }
+          if (sql.includes('INSERT INTO app.run_events')) {
+            return { rows: [{ id: 'evt-1', seq: 1 }] };
+          }
+          return { rows: [] };
+        };
+
+        const mockClient = { query: queryHandler, release: () => {} };
+        const mockPool = { query: queryHandler, connect: async () => mockClient } as unknown as pg.Pool;
+
+        const liaraJsonContent = JSON.stringify({
+          next: { mirror: false },
+          build: { location: 'germany' },
+          port: 3000,
+        });
+
+        const mockRunner: AgentRunner = async (opts) => {
+          // Verify propose_deployment schema does NOT expose buildLocation or platformConfig to the LLM
+          const deployTool = opts.tools.find((t) => t.name === 'propose_deployment');
+          expect(deployTool).toBeDefined();
+          expect((deployTool!.schema.properties as any).buildLocation).toBeUndefined();
+          expect((deployTool!.schema.properties as any).platformConfig).toBeUndefined();
+
+          // 1. Inspect repository first (required gate)
+          const inspectTool = opts.tools.find((t) => t.name === 'inspect_repository');
+          expect(inspectTool).toBeDefined();
+          const inspectRes = await inspectTool!.execute({ owner: 'acme', repo: 'next-app' });
+          expect(inspectRes).toHaveProperty('success', true);
+
+          // 2. Propose deployment - model sends only appId, platform, port
+          const propResult = await deployTool!.execute({
+            appId: 'my-next-app',
+            platform: 'next',
+            port: 3000,
+          });
+          expect(propResult).toHaveProperty('proposalHash');
+
+          return {
+            success: true,
+            interrupted: false,
+            message: 'Deployment proposed',
+            usage: { promptTokens: 50, completionTokens: 50, totalTokens: 100, callsCount: 2 },
+            toolTrace: [],
+          };
+        };
+
+        const result = await executeAgentTaskRun(mockPool, 'worker-test', 'run-source-cfg-1', 30, {
+          runner: mockRunner,
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                project: {
+                  _id: 'proj_123',
+                  project_id: 'my-next-app',
+                  type: 'next',
+                  status: 'created',
+                },
+              }),
+              { status: 200, headers: { 'content-type': 'application/json' } }
+            ),
+          sourceFetcher: async () => ({
+            commit: 'c'.repeat(40),
+            inventory: {
+              files: [
+                {
+                  path: 'package.json',
+                  bytes: Buffer.from('{"name":"next-app","scripts":{"start":"next start"}}'),
+                },
+                {
+                  path: 'liara.json',
+                  bytes: Buffer.from(liaraJsonContent),
+                },
+              ],
+              archiveDigest: 'sha256:' + 'd'.repeat(64),
+              archiveBytes: 100,
+              expandedBytes: 100,
+              entryCount: 2,
+              excludedCount: 0,
+              oversizedCount: 0,
+            },
+            bundle: {
+              archiveBytes: new Uint8Array([4, 5, 6]),
+              bundleDigest: `sha256:${crypto.createHash('sha256').update(new Uint8Array([4, 5, 6])).digest('hex')}`,
+              filesCount: 2,
+              totalBytes: 6,
+            },
+            repo: {
+              owner: 'acme',
+              repo: 'next-app',
+              ref: 'main',
+            },
+          }),
+        });
+
+        expect(result.run.status).toBe('succeeded');
+        expect(completedOutput.proposedAction).toBeDefined();
+        expect(completedOutput.proposedAction.kind).toBe('deploy');
+        expect(completedOutput.proposedAction.platform).toBe('next');
+        expect(completedOutput.proposedAction.buildLocation).toBe('germany');
+        expect(completedOutput.proposedAction.platformConfig).toEqual({ mirror: false });
+
+        const expectedHash = hashDeploymentProposal(completedOutput.proposedAction);
+        expect(completedOutput.proposalHash).toBe(expectedHash);
+      });
     });
   });
 

@@ -1591,5 +1591,66 @@ describe('Approved Action Execution Handler', () => {
         expect(serializedEvent).not.toContain('CANARY_SECRET_KEY');
       }
     });
+
+    it('passes build.location and platformConfig from approved proposal to createRelease matching CLI deploy.js', async () => {
+      const deployWithBuildConfig: DeployProposal = {
+        ...mockDeployProposal,
+        bundleDigest: sampleBundleDigest,
+        platform: 'next',
+        buildLocation: 'germany',
+        platformConfig: { mirror: false },
+      };
+
+      const customMockDeps: ApprovedActionDependencies = {
+        ...mockDeps,
+        getApprovedAction: vi.fn().mockResolvedValue({
+          approvalId: 'appr_build_cfg_1',
+          workspaceId: 'ws_1',
+          sourceRunId: 'src_run_1',
+          executionRunId: 'run_1',
+          proposal: deployWithBuildConfig,
+          proposalHash: hashDeploymentProposal(deployWithBuildConfig),
+          ownerId: 'owner_1',
+          approvedAt: new Date(),
+          expiresAt: new Date(Date.now() + 60000),
+          dispatchedAt: null,
+          dispatchAttempt: 1,
+        }),
+      };
+
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'next', status: 'CREATED' }),
+        uploadSource: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { sourceId: 'src_bld_cfg_202' },
+          correlationId: 'corr_upload_bld',
+        }),
+        createRelease: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { releaseId: 'rel_bld_cfg_303' },
+          correlationId: 'corr_rel_bld',
+        }),
+        getReleaseDetail: vi.fn().mockResolvedValue({
+          id: 'rel_bld_cfg_303',
+          state: 'READY',
+          status: 'READY',
+        }),
+      };
+      customMockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, customMockDeps);
+      expect(result.phase).toBe('verified');
+
+      // Verify createRelease received build and platformConfig
+      expect(adapterMock.createRelease).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceId: 'src_bld_cfg_202',
+          platform: 'next',
+          build: { location: 'germany' },
+          platformConfig: { mirror: false },
+        }),
+        expect.anything()
+      );
+    });
   });
 });

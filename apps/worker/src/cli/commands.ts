@@ -315,6 +315,8 @@ export async function executeStatusCommand(
                       },
                     }
                   : {}),
+                ...(p.buildLocation ? { buildLocation: p.buildLocation } : {}),
+                ...(p.platformConfig ? { platformConfig: p.platformConfig } : {}),
                 proposalHash: computedHash,
               };
               break;

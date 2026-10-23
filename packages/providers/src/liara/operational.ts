@@ -115,6 +115,9 @@ export interface CreateReleaseParams {
   readonly port?: number;
   readonly platform?: string;
   readonly runtimeEnvs?: readonly { readonly key: string; readonly value: string }[];
+  readonly build?: { readonly location?: 'iran' | 'germany' };
+  readonly buildLocation?: 'iran' | 'germany';
+  readonly platformConfig?: { readonly mirror?: boolean };
 }
 
 export interface RestartAppParams {
@@ -167,6 +170,18 @@ export interface SafeLiaraLogsResult {
   readonly truncated: boolean;
   readonly bytesBudgetExceeded: boolean;
   readonly bytesRead: number;
+}
+
+export interface SafeLiaraBuildLogLine {
+  readonly stream: 'STDOUT' | 'STDERR' | 'unknown';
+  readonly line: string;
+  readonly createdAt: string;
+}
+
+export interface SafeLiaraBuildLogsResult {
+  readonly state: string;
+  readonly lines: readonly SafeLiaraBuildLogLine[];
+  readonly truncated: boolean;
 }
 
 export interface LiaraLogQueryOptions {
@@ -1219,6 +1234,7 @@ export class LiaraOperationalAdapter {
     if (params.runtimeEnvs && params.runtimeEnvs.length > 0) {
       throw new Error('runtime environments require credential references at broker');
     }
+    const buildLocation = params.build?.location ?? params.buildLocation;
     return {
       id: crypto.randomUUID(),
       operation: 'create_release',
@@ -1229,6 +1245,8 @@ export class LiaraOperationalAdapter {
         sourceId: params.sourceId,
         port: params.port,
         platform: params.platform,
+        ...(buildLocation ? { build: { location: buildLocation } } : {}),
+        ...(params.platformConfig ? { platformConfig: params.platformConfig } : {}),
       },
       riskLevel: 'high',
       createdAt: new Date().toISOString(),
@@ -1419,6 +1437,35 @@ export class LiaraOperationalAdapter {
     // Validate runtimeEnvs before any dispatch
     const envsRecord = this.validateRuntimeEnvs(params.runtimeEnvs);
 
+    // Validate optional build location (strict enum iran/germany)
+    const buildLocation = params.build?.location ?? params.buildLocation;
+    if (buildLocation !== undefined && buildLocation !== 'iran' && buildLocation !== 'germany') {
+      throw new Error('Invalid build location: must be iran or germany');
+    }
+
+    // Validate optional platformConfig (strict allowlist {mirror?: boolean} only)
+    if (params.platformConfig !== undefined) {
+      if (
+        typeof params.platformConfig !== 'object' ||
+        params.platformConfig === null ||
+        Array.isArray(params.platformConfig)
+      ) {
+        throw new Error('Invalid platformConfig: must be an object');
+      }
+      const allowedKeys = ['mirror'];
+      for (const key of Object.keys(params.platformConfig)) {
+        if (!allowedKeys.includes(key)) {
+          throw new Error(`Invalid platformConfig key: ${key}`);
+        }
+      }
+      if (
+        params.platformConfig.mirror !== undefined &&
+        typeof params.platformConfig.mirror !== 'boolean'
+      ) {
+        throw new Error('platformConfig.mirror must be a boolean');
+      }
+    }
+
     try {
       const bodyPayload: Record<string, unknown> = {
         sourceID: cleanSourceId,
@@ -1431,6 +1478,12 @@ export class LiaraOperationalAdapter {
       }
       if (envsRecord) {
         bodyPayload.envs = envsRecord;
+      }
+      if (buildLocation) {
+        bodyPayload.build = { location: buildLocation };
+      }
+      if (params.platformConfig) {
+        bodyPayload.platformConfig = params.platformConfig;
       }
 
       const { data, correlationId } = await this.safeOperationalFetch(
@@ -1696,6 +1749,105 @@ export class LiaraOperationalAdapter {
       port,
       failReason: safeFailReason,
     };
+  }
+
+  /**
+   * Bounded diagnostic build logs for a release.
+   * Documented in Liara CLI: GET /v2/releases/{releaseId}/build-logs?since={since}
+   */
+  async getBuildLogs(
+    releaseId: string,
+    options: { since?: string; maxLines?: number } = {}
+  ): Promise<SafeLiaraBuildLogsResult> {
+    if (!releaseId || typeof releaseId !== 'string' || !STRICT_ID_REGEX.test(releaseId.trim())) {
+      throw new Error('Valid strict releaseId is required');
+    }
+    const cleanReleaseId = releaseId.trim();
+
+    let maxLines = 50;
+    if (typeof options.maxLines === 'number' && Number.isFinite(options.maxLines)) {
+      maxLines = Math.min(Math.max(Math.floor(options.maxLines), 1), 200);
+    }
+
+    let queryStr = '';
+    if (options.since) {
+      const sinceParam = String(options.since).slice(0, 64);
+      queryStr = `?since=${encodeURIComponent(sinceParam)}`;
+    }
+
+    try {
+      const res = await this.safeOperationalFetch(
+        `/v2/releases/${encodeURIComponent(cleanReleaseId)}/build-logs${queryStr}`,
+        { method: 'GET' },
+        false
+      );
+
+      if (typeof res.data !== 'object' || res.data === null) {
+        return { state: 'UNKNOWN', lines: [], truncated: false };
+      }
+
+      const rec = res.data as Record<string, unknown>;
+      const releaseObj =
+        typeof rec.release === 'object' && rec.release !== null
+          ? (rec.release as Record<string, unknown>)
+          : undefined;
+
+      const rawState =
+        typeof releaseObj?.state === 'string' ? releaseObj.state.trim().toUpperCase() : '';
+      const safeState = ALLOWED_RELEASE_STATES.has(rawState) ? rawState : 'UNKNOWN';
+
+      const rawOutput = Array.isArray(rec.buildOutput) ? rec.buildOutput : [];
+
+      const lines: SafeLiaraBuildLogLine[] = [];
+      let truncated = false;
+
+      for (const item of rawOutput) {
+        if (lines.length >= maxLines) {
+          truncated = true;
+          break;
+        }
+        if (typeof item === 'object' && item !== null) {
+          const itemRec = item as Record<string, unknown>;
+
+          // 1. Redact secrets using established this.redact before truncation
+          const rawLine = typeof itemRec.line === 'string' ? itemRec.line : '';
+          const redacted = this.redact(rawLine);
+          const lineStr = redacted.slice(0, 1024);
+
+          // 2. Stream allowlist: STDOUT / STDERR / unknown
+          const rawStream =
+            typeof itemRec.stream === 'string' ? itemRec.stream.trim().toUpperCase() : '';
+          const streamStr: 'STDOUT' | 'STDERR' | 'unknown' =
+            rawStream === 'STDOUT' || rawStream === 'STDERR' ? rawStream : 'unknown';
+
+          // 3. createdAt validate ISO else empty
+          let safeCreatedAt = '';
+          if (typeof itemRec.createdAt === 'string' && itemRec.createdAt.length <= 64) {
+            const parsedTime = Date.parse(itemRec.createdAt);
+            if (!Number.isNaN(parsedTime)) {
+              safeCreatedAt = new Date(parsedTime).toISOString();
+            }
+          }
+
+          lines.push({
+            stream: streamStr,
+            line: lineStr,
+            createdAt: safeCreatedAt,
+          });
+        }
+      }
+
+      return {
+        state: safeState,
+        lines,
+        truncated,
+      };
+    } catch (err) {
+      if (err instanceof LiaraApiError && (err.statusCode === 404 || err.code === 'HTTP_404')) {
+        return { state: 'UNKNOWN', lines: [], truncated: false };
+      }
+      throw err;
+    }
   }
 
   /**

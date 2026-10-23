@@ -636,6 +636,22 @@ export function AssistantSidebar({
                             </span>
                           </div>
                         )}
+                        {msg.proposedAction.buildLocation && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">موقعیت ساخت:</span>
+                            <span className="font-mono text-zinc-200" dir="ltr">
+                              {msg.proposedAction.buildLocation}
+                            </span>
+                          </div>
+                        )}
+                        {msg.proposedAction.platformConfig?.mirror !== undefined && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">مخزن آینه پکیج:</span>
+                            <span className="font-mono text-zinc-200" dir="ltr">
+                              {msg.proposedAction.platformConfig.mirror ? 'فعال' : 'غیرفعال'}
+                            </span>
+                          </div>
+                        )}
                       </>
                     )}
 

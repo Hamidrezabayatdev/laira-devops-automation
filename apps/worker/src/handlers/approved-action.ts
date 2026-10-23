@@ -1052,6 +1052,8 @@ export async function executeApprovedAgentActionRun(
           platform: deployProp.platform,
           port: deployProp.port,
           runtimeEnvs: resolvedRuntimeEnvs,
+          ...(deployProp.buildLocation ? { build: { location: deployProp.buildLocation } } : {}),
+          ...(deployProp.platformConfig ? { platformConfig: deployProp.platformConfig } : {}),
         },
         authority
       );

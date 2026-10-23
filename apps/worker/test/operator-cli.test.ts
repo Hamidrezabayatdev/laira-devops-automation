@@ -1413,6 +1413,72 @@ describe('Product Operator CLI DB Integration Tests', () => {
   );
 
   it.skipIf(!testDbUrl)(
+    'status command safely projects buildLocation and platformConfig without exposing arbitrary properties',
+    async () => {
+      const { deps } = createIntegrationDeps();
+
+      const { workspace } = await getOrCreateOwnerWorkspace(pool, {
+        user: { id: DEMO_OPERATOR_ID, name: 'Operator' },
+        githubUserId: DEMO_OPERATOR_ID,
+      });
+      trackedWorkspaceIds.add(workspace.id);
+
+      const sampleProposalWithBuildConfig: DeployProposal = {
+        kind: 'deploy',
+        connectionId: 'conn_test_safe',
+        credentialVersion: 1,
+        appId: 'demo-app-bld',
+        platform: 'next',
+        port: 3000,
+        repository: {
+          owner: 'testowner',
+          repo: 'testrepo',
+          commitSha: 'a'.repeat(40),
+        },
+        bundleDigest: `sha256:${'b'.repeat(64)}`,
+        buildLocation: 'germany',
+        platformConfig: { mirror: false },
+      };
+
+      const proposalHash = hashDeploymentProposal(sampleProposalWithBuildConfig);
+
+      const run = await createRun(
+        pool,
+        { workspaceId: workspace.id },
+        {
+          type: 'agent_task',
+          input: { task: 'Deploy next with build config' },
+        }
+      );
+
+      await pool.query(
+        `UPDATE app.runs
+         SET status = 'succeeded',
+             output = $1
+         WHERE id = $2`,
+        [
+          JSON.stringify({
+            message: 'Analysis completed successfully',
+            phase: 'proposal_ready',
+            proposedAction: sampleProposalWithBuildConfig,
+            proposalHash,
+          }),
+          run.id,
+        ]
+      );
+
+      const statusRes = await executeStatusCommand({ run: run.id }, deps);
+
+      expect(statusRes.status).toBe('succeeded');
+      expect(statusRes.proposal?.kind).toBe('deploy');
+      if (statusRes.proposal?.kind === 'deploy') {
+        expect(statusRes.proposal.buildLocation).toBe('germany');
+        expect(statusRes.proposal.platformConfig).toEqual({ mirror: false });
+      }
+    }
+  );
+
+  it.skipIf(!testDbUrl)(
     'status command safely extracts create_app kind proposal with visible cost object',
     async () => {
       const { deps } = createIntegrationDeps();

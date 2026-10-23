@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { describe, it, expect } from 'vitest';
 import {
   DeploymentProposalSchema,
   DeployProposalSchema,
@@ -8,6 +7,9 @@ import {
   AppCostSchema,
   ApprovedAppPlanSchema,
   LiaraPlatformSchema,
+  BuildLocationSchema,
+  PlatformConfigSchema,
+  parseInspectedLiaraConfig,
   hashDeploymentProposal,
   type DeployProposal,
   type RestartProposal,
@@ -287,6 +289,138 @@ describe('DeploymentProposal Domain Model', () => {
           runtimeEnvironment: { connectionId: 'conn_env_99', credentialVersion: 1, extra: 'bad' },
         })
       ).toThrow();
+    });
+
+    it('validates optional buildLocation enum (iran/germany) and rejects invalid locations', () => {
+      const withIran = { ...validDeployProposal, buildLocation: 'iran' as const };
+      expect(DeployProposalSchema.parse(withIran).buildLocation).toBe('iran');
+
+      const withGermany = { ...validDeployProposal, buildLocation: 'germany' as const };
+      expect(DeployProposalSchema.parse(withGermany).buildLocation).toBe('germany');
+
+      expect(() =>
+        DeployProposalSchema.parse({ ...validDeployProposal, buildLocation: 'us' })
+      ).toThrow();
+
+      expect(() =>
+        DeployProposalSchema.parse({ ...validDeployProposal, buildLocation: '' })
+      ).toThrow();
+    });
+
+    it('validates optional platformConfig with strict allowlist {mirror?: boolean} and rejects arbitrary keys', () => {
+      const withMirrorFalse = {
+        ...validDeployProposal,
+        platformConfig: { mirror: false },
+      };
+      expect(DeployProposalSchema.parse(withMirrorFalse).platformConfig).toEqual({ mirror: false });
+
+      const withMirrorTrue = {
+        ...validDeployProposal,
+        platformConfig: { mirror: true },
+      };
+      expect(DeployProposalSchema.parse(withMirrorTrue).platformConfig).toEqual({ mirror: true });
+
+      const withEmptyConfig = {
+        ...validDeployProposal,
+        platformConfig: {},
+      };
+      expect(DeployProposalSchema.parse(withEmptyConfig).platformConfig).toEqual({});
+
+      // Rejects non-boolean mirror
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...validDeployProposal,
+          platformConfig: { mirror: 'false' as any },
+        })
+      ).toThrow();
+
+      // Rejects arbitrary commands/args/secrets
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...validDeployProposal,
+          platformConfig: { mirror: false, command: 'rm -rf /' } as any,
+        })
+      ).toThrow();
+
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...validDeployProposal,
+          platformConfig: { mirror: false, args: ['--insecure'] } as any,
+        })
+      ).toThrow();
+    });
+  });
+
+  describe('parseInspectedLiaraConfig', () => {
+    it('safely extracts build.location and next.mirror from target liara.json', () => {
+      const jsonContent = JSON.stringify({
+        next: { mirror: false },
+        build: { location: 'germany' },
+        port: 3000,
+      });
+      const files = [
+        { path: 'liara.json', bytes: new TextEncoder().encode(jsonContent) },
+      ];
+
+      const config = parseInspectedLiaraConfig(files);
+      expect(config).toEqual({
+        buildLocation: 'germany',
+        platformConfigs: {
+          next: { mirror: false },
+        },
+      });
+    });
+
+    it('safely extracts node.mirror and iran build location', () => {
+      const jsonContent = JSON.stringify({
+        node: { mirror: true },
+        build: { location: 'iran' },
+      });
+      const files = [
+        { path: './liara.json', bytes: new TextEncoder().encode(jsonContent) },
+      ];
+
+      const config = parseInspectedLiaraConfig(files);
+      expect(config).toEqual({
+        buildLocation: 'iran',
+        platformConfigs: {
+          node: { mirror: true },
+        },
+      });
+    });
+
+    it('ignores unknown platforms and arbitrary commands or secrets', () => {
+      const jsonContent = JSON.stringify({
+        build: { location: 'germany', arbitraryCommand: 'curl evil.com' },
+        python: { mirror: false },
+        arbitrarySecret: 'secret_token_123',
+      });
+      const files = [
+        { path: 'liara.json', bytes: new TextEncoder().encode(jsonContent) },
+      ];
+
+      const config = parseInspectedLiaraConfig(files);
+      expect(config).toEqual({
+        buildLocation: 'germany',
+      });
+      expect((config as any).arbitrarySecret).toBeUndefined();
+    });
+
+    it('returns null when liara.json is missing, malformed, or exceeds 64 KiB', () => {
+      expect(parseInspectedLiaraConfig([])).toBeNull();
+
+      expect(
+        parseInspectedLiaraConfig([
+          { path: 'liara.json', bytes: new TextEncoder().encode('not valid json {') },
+        ])
+      ).toBeNull();
+
+      const oversized = new Uint8Array(65537);
+      expect(
+        parseInspectedLiaraConfig([
+          { path: 'liara.json', bytes: oversized },
+        ])
+      ).toBeNull();
     });
   });
 
@@ -678,6 +812,56 @@ describe('DeploymentProposal Domain Model', () => {
         runtimeEnvironment: { connectionId: 'conn_env_1', credentialVersion: 2 },
       });
       expect(envHashVerDiff).not.toBe(envHash);
+    });
+
+    it('binds buildLocation into proposal hash deterministically', () => {
+      const baseHash = hashDeploymentProposal(validDeployProposal);
+
+      const withGermany = {
+        ...validDeployProposal,
+        buildLocation: 'germany' as const,
+      };
+      const germanyHash = hashDeploymentProposal(withGermany);
+      expect(germanyHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(germanyHash).not.toBe(baseHash);
+
+      const withIran = {
+        ...validDeployProposal,
+        buildLocation: 'iran' as const,
+      };
+      const iranHash = hashDeploymentProposal(withIran);
+      expect(iranHash).not.toBe(baseHash);
+      expect(iranHash).not.toBe(germanyHash);
+    });
+
+    it('binds platformConfig mirror into proposal hash deterministically', () => {
+      const baseHash = hashDeploymentProposal(validDeployProposal);
+
+      const withMirrorFalse = {
+        ...validDeployProposal,
+        platformConfig: { mirror: false },
+      };
+      const falseHash = hashDeploymentProposal(withMirrorFalse);
+      expect(falseHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(falseHash).not.toBe(baseHash);
+
+      const withMirrorTrue = {
+        ...validDeployProposal,
+        platformConfig: { mirror: true },
+      };
+      const trueHash = hashDeploymentProposal(withMirrorTrue);
+      expect(trueHash).not.toBe(baseHash);
+      expect(trueHash).not.toBe(falseHash);
+
+      // Combined buildLocation and platformConfig
+      const withBoth = {
+        ...validDeployProposal,
+        buildLocation: 'germany' as const,
+        platformConfig: { mirror: false },
+      };
+      const bothHash = hashDeploymentProposal(withBoth);
+      expect(bothHash).not.toBe(falseHash);
+      expect(bothHash).not.toBe(baseHash);
     });
 
     it('strictly rejects undefined values or accessors', () => {

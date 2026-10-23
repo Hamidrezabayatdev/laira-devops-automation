@@ -53,6 +53,87 @@ export const RuntimeEnvironmentReferenceSchema = z
 
 export type RuntimeEnvironmentReference = z.infer<typeof RuntimeEnvironmentReferenceSchema>;
 
+export const BUILD_LOCATIONS = ['iran', 'germany'] as const;
+export const BuildLocationSchema = z.enum(BUILD_LOCATIONS);
+export type BuildLocation = z.infer<typeof BuildLocationSchema>;
+
+export const PlatformConfigSchema = z
+  .object({
+    mirror: z.boolean().optional(),
+  })
+  .strict();
+export type PlatformConfig = z.infer<typeof PlatformConfigSchema>;
+
+export interface InspectedSourceConfig {
+  buildLocation?: BuildLocation;
+  platformConfigs?: Partial<Record<string, PlatformConfig>>;
+}
+
+/**
+ * Strict bounded parsing of liara.json from inspected repository inventory files.
+ * Rules:
+ * - Pure JSON parsing (no eval, no execution, no prototype pollution).
+ * - Bounded input (<= 64 KiB).
+ * - Safe extraction of strict allowlist only:
+ *   - build.location ('iran' | 'germany')
+ *   - per-approved-platform mirror: next.mirror, node.mirror (boolean)
+ * - Returns null or strictly sanitized config object with no arbitrary properties.
+ */
+export function parseInspectedLiaraConfig(
+  files: readonly { readonly path: string; readonly bytes: Uint8Array }[]
+): InspectedSourceConfig | null {
+  const file = files.find(
+    (f) => f.path === 'liara.json' || f.path === './liara.json'
+  );
+  if (!file) {
+    return null;
+  }
+
+  // Max 64 KiB
+  if (file.bytes.length > 65536) {
+    return null;
+  }
+
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes);
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+
+    const obj = parsed as Record<string, unknown>;
+    const result: InspectedSourceConfig = {};
+
+    // 1. build.location: only 'iran' | 'germany'
+    if (obj.build && typeof obj.build === 'object' && !Array.isArray(obj.build)) {
+      const buildObj = obj.build as Record<string, unknown>;
+      if (buildObj.location === 'iran' || buildObj.location === 'germany') {
+        result.buildLocation = buildObj.location;
+      }
+    }
+
+    // 2. per approved platform mirror: next.mirror, node.mirror
+    const platformConfigs: Partial<Record<string, PlatformConfig>> = {};
+    for (const plat of ['next', 'node'] as const) {
+      const platObj = obj[plat];
+      if (platObj && typeof platObj === 'object' && !Array.isArray(platObj)) {
+        const pRec = platObj as Record<string, unknown>;
+        if (typeof pRec.mirror === 'boolean') {
+          platformConfigs[plat] = { mirror: pRec.mirror };
+        }
+      }
+    }
+
+    if (Object.keys(platformConfigs).length > 0) {
+      result.platformConfigs = platformConfigs;
+    }
+
+    return result;
+  } catch {
+    return null;
+  }
+}
+
 export const DeployProposalSchema = z
   .object({
     kind: z.literal('deploy'),
@@ -80,6 +161,8 @@ export const DeployProposalSchema = z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/, 'bundleDigest must be sha256:<64 lowercase hex characters>'),
     runtimeEnvironment: RuntimeEnvironmentReferenceSchema.optional(),
+    buildLocation: BuildLocationSchema.optional(),
+    platformConfig: PlatformConfigSchema.optional(),
   })
   .strict();
 

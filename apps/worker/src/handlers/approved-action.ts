@@ -702,12 +702,29 @@ export async function executeApprovedAgentActionRun(
 
       // Pre-write check: platform compatibility for deploy
       if (proposal.kind === 'deploy') {
-        if (appDetail.type && appDetail.type.toLowerCase() !== proposal.platform.toLowerCase()) {
+        const deployProp = proposal as DeployProposal;
+        const currentType = (appDetail.type || '').toLowerCase();
+        const targetPlatform = deployProp.platform.toLowerCase();
+        const prevPlatform = deployProp.previousPlatform ? deployProp.previousPlatform.toLowerCase() : undefined;
+
+        // If previousPlatform is present, it must EXACTLY match the old appDetail.type (avoid drift)
+        if (prevPlatform && prevPlatform !== currentType) {
           const failed = await doFailRun(pool, workerId, runId, {
-            code: 'PLATFORM_MISMATCH',
-            message: 'Target application platform on provider does not match proposal platform',
+            code: 'PLATFORM_DRIFT',
+            message: 'Target application platform on provider has drifted from approved previous platform',
           });
-          return { run: failed, phase: 'rejected_platform_mismatch', eventsEmitted };
+          return { run: failed, phase: 'rejected_platform_drift', eventsEmitted };
+        }
+
+        // Different target only allowed if previousPlatform matches current
+        if (targetPlatform !== currentType) {
+          if (!prevPlatform || prevPlatform !== currentType) {
+            const failed = await doFailRun(pool, workerId, runId, {
+              code: 'PLATFORM_MISMATCH',
+              message: 'Target application platform on provider does not match proposal platform',
+            });
+            return { run: failed, phase: 'rejected_platform_mismatch', eventsEmitted };
+          }
         }
       }
     }

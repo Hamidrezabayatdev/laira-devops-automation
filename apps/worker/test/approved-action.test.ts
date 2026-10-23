@@ -359,6 +359,94 @@ describe('Approved Action Execution Handler', () => {
       expect(mockDeps.claimDispatch).not.toHaveBeenCalled();
     });
 
+    it('fails run if target app platform differs without previousPlatform', async () => {
+      const dockerProposal: DeployProposal = {
+        ...mockDeployProposal,
+        platform: 'docker',
+      };
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_1',
+        proposal: dockerProposal,
+        proposalHash: hashDeploymentProposal(dockerProposal),
+        dispatchedAt: null,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue({
+        getAppDetail: vi.fn().mockResolvedValue({
+          projectId: 'my-test-app',
+          type: 'next',
+        }),
+      });
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_platform_mismatch');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'PLATFORM_MISMATCH' })
+      );
+      expect(mockDeps.claimDispatch).not.toHaveBeenCalled();
+    });
+
+    it('fails run if provider platform drifted from approved previousPlatform', async () => {
+      const transitionProposal: DeployProposal = {
+        ...mockDeployProposal,
+        platform: 'docker',
+        previousPlatform: 'next',
+      };
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_1',
+        proposal: transitionProposal,
+        proposalHash: hashDeploymentProposal(transitionProposal),
+        dispatchedAt: null,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue({
+        getAppDetail: vi.fn().mockResolvedValue({
+          projectId: 'my-test-app',
+          type: 'django', // drifted from 'next'
+        }),
+      });
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_platform_drift');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'PLATFORM_DRIFT' })
+      );
+      expect(mockDeps.claimDispatch).not.toHaveBeenCalled();
+    });
+
+    it('allows run if previousPlatform matches current provider platform (transition allowed)', async () => {
+      const transitionProposal: DeployProposal = {
+        ...mockDeployProposal,
+        platform: 'docker',
+        previousPlatform: 'next',
+      };
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_1',
+        proposal: transitionProposal,
+        proposalHash: hashDeploymentProposal(transitionProposal),
+        dispatchedAt: null,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      const defaultAdapter = mockDeps.createLiaraAdapter();
+      defaultAdapter.getAppDetail = vi.fn().mockResolvedValue({
+        projectId: 'my-test-app',
+        type: 'next', // matches previousPlatform
+        status: 'running',
+      });
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(defaultAdapter);
+
+      // It will proceed past platform pre-write check to GitHub source fetch and complete
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('verified');
+      expect(mockDeps.claimDispatch).toHaveBeenCalled();
+    });
+
     it('fails run if GitHub commit SHA does not match', async () => {
       mockDeps.fetchGithubSource = vi.fn().mockResolvedValue({
         commit: 'b'.repeat(40), // mismatch

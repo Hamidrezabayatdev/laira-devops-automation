@@ -47,6 +47,7 @@ import {
   type RestartProposal,
   type CreateAppProposal,
   type DeploymentProposal,
+  type LiaraPlatform,
   type ApprovedAppPlan,
   type RuntimeEnvironmentReference,
   type BuildLocation,
@@ -926,10 +927,18 @@ export async function executeAgentTaskRun(
             };
           }
 
-          // Verify app exists in Liara
+          // Verify app exists in Liara and read current app details
+          let currentAppPlatform: LiaraPlatform | undefined;
           if (liaraClient) {
             try {
-              await liaraClient.getProjectDetail(args.appId);
+              const projectDetail = await liaraClient.getProjectDetail(args.appId);
+              if (projectDetail && typeof projectDetail.type === 'string') {
+                const parsedType = LiaraPlatformSchema.safeParse(projectDetail.type.toLowerCase());
+                if (parsedType.success && parsedType.data !== args.platform.toLowerCase()) {
+                  // Bind authoritative previous platform from provider when target platform differs
+                  currentAppPlatform = parsedType.data;
+                }
+              }
             } catch {
               return {
                 error: 'APP_NOT_FOUND',
@@ -961,6 +970,7 @@ export async function executeAgentTaskRun(
             credentialVersion: activeCredentialVersion,
             appId: args.appId,
             platform: args.platform,
+            ...(currentAppPlatform ? { previousPlatform: currentAppPlatform } : {}),
             port: Math.floor(args.port),
             repository: {
               owner: currentRepo.owner,

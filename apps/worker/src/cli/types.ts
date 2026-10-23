@@ -58,6 +58,7 @@ export interface SafeProposalBase {
 export interface SafeDeployProposal extends SafeProposalBase {
   kind: 'deploy';
   platform: string;
+  previousPlatform?: string;
   port: number;
   repository: {
     owner: string;

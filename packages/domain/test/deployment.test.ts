@@ -84,6 +84,14 @@ describe('DeploymentProposal Domain Model', () => {
       }
     });
 
+    it('accepts valid previousPlatform and rejects invalid previousPlatform', () => {
+      const withPrev = DeployProposalSchema.parse({ ...validDeployProposal, previousPlatform: 'next' });
+      expect(withPrev.previousPlatform).toBe('next');
+      expect(() =>
+        DeployProposalSchema.parse({ ...validDeployProposal, previousPlatform: 'invalid_plat' })
+      ).toThrow();
+    });
+
     it('rejects unsupported platforms', () => {
       expect(() =>
         DeployProposalSchema.parse({ ...validDeployProposal, platform: 'ruby' })
@@ -670,6 +678,12 @@ describe('DeploymentProposal Domain Model', () => {
       // platform change
       const hashPlatform = hashDeploymentProposal({ ...validDeployProposal, platform: 'docker' });
       expect(hashPlatform).not.toBe(baseHash);
+
+      // previousPlatform change
+      const hashWithPrev = hashDeploymentProposal({ ...validDeployProposal, previousPlatform: 'next' });
+      expect(hashWithPrev).not.toBe(baseHash);
+      const hashWithOtherPrev = hashDeploymentProposal({ ...validDeployProposal, previousPlatform: 'node' });
+      expect(hashWithOtherPrev).not.toBe(hashWithPrev);
 
       // port change
       const hashPort = hashDeploymentProposal({ ...validDeployProposal, port: 8080 });

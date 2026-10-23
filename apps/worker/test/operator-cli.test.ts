@@ -1479,6 +1479,72 @@ describe('Product Operator CLI DB Integration Tests', () => {
   );
 
   it.skipIf(!testDbUrl)(
+    'status command safely extracts platform transition deploy proposal with previousPlatform',
+    async () => {
+      const { deps } = createIntegrationDeps();
+
+      const { workspace } = await getOrCreateOwnerWorkspace(pool, {
+        user: { id: DEMO_OPERATOR_ID, name: 'Operator' },
+        githubUserId: DEMO_OPERATOR_ID,
+      });
+      trackedWorkspaceIds.add(workspace.id);
+
+      const sampleProposalWithTransition: DeployProposal = {
+        kind: 'deploy',
+        connectionId: 'conn_test_safe',
+        credentialVersion: 1,
+        appId: 'demo-app-trans',
+        platform: 'docker',
+        previousPlatform: 'next',
+        port: 3000,
+        repository: {
+          owner: 'testowner',
+          repo: 'testrepo',
+          commitSha: 'a'.repeat(40),
+        },
+        bundleDigest: `sha256:${'b'.repeat(64)}`,
+      };
+
+      const proposalHash = hashDeploymentProposal(sampleProposalWithTransition);
+
+      const run = await createRun(
+        pool,
+        { workspaceId: workspace.id },
+        {
+          type: 'agent_task',
+          input: { task: 'Transition platform to docker' },
+        }
+      );
+
+      await pool.query(
+        `UPDATE app.runs
+         SET status = 'succeeded',
+             output = $1
+         WHERE id = $2`,
+        [
+          JSON.stringify({
+            message: 'Platform transition proposed',
+            phase: 'proposal_ready',
+            proposedAction: sampleProposalWithTransition,
+            proposalHash,
+          }),
+          run.id,
+        ]
+      );
+
+      const statusRes = await executeStatusCommand({ run: run.id }, deps);
+
+      expect(statusRes.status).toBe('succeeded');
+      expect(statusRes.proposal?.kind).toBe('deploy');
+      if (statusRes.proposal?.kind === 'deploy') {
+        expect(statusRes.proposal.platform).toBe('docker');
+        expect(statusRes.proposal.previousPlatform).toBe('next');
+        expect(statusRes.proposal.proposalHash).toBe(proposalHash);
+      }
+    }
+  );
+
+  it.skipIf(!testDbUrl)(
     'status command safely extracts create_app kind proposal with visible cost object',
     async () => {
       const { deps } = createIntegrationDeps();

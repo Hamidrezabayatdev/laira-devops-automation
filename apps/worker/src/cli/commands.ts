@@ -300,6 +300,7 @@ export async function executeStatusCommand(
                 credentialVersion: p.credentialVersion,
                 appId: p.appId,
                 platform: p.platform,
+                ...(p.previousPlatform ? { previousPlatform: p.previousPlatform } : {}),
                 port: p.port,
                 repository: {
                   owner: p.repository.owner,

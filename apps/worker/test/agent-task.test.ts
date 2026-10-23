@@ -1645,6 +1645,211 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
         expect(completedOutput.proposalHash).toBe(expectedHash);
       });
 
+      it('propose_deployment binds authoritative previousPlatform when target differs and rejects model overrides', async () => {
+        let runStatus = 'queued';
+        let completedOutput: any = null;
+
+        const mockLiaraEncrypted = encryptCredential(
+          JSON.stringify({ apiKey: 'mock-liara-key' }),
+          TEST_ENCRYPTION_KEY,
+          { workspaceId: 'ws-plat-test', connectionId: 'conn-liara-1', version: '1', keyVersion: 1 }
+        );
+
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-plat-trans',
+                  type: 'agent_task',
+                  status: runStatus,
+                  claimed_by: runStatus === 'running' ? 'worker-test' : null,
+                  workspace_id: 'ws-plat-test',
+                  input: {
+                    repository: 'https://github.com/acme/app',
+                    task: 'Deploy fix with docker',
+                    connectionId: 'conn-liara-1',
+                  },
+                  output: completedOutput,
+                  heartbeat_at: new Date(),
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            runStatus = 'running';
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-plat-trans',
+                  workspace_id: 'ws-plat-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {
+                    repository: 'https://github.com/acme/app',
+                    task: 'Deploy fix with docker',
+                    connectionId: 'conn-liara-1',
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('heartbeat_at = NOW()')) {
+            return { rows: [{ id: 'run-deploy-plat-trans' }] };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'succeeded'")) {
+            runStatus = 'succeeded';
+            completedOutput = params
+              ? (typeof params[0] === 'string' ? JSON.parse(params[0]) : params[0])
+              : null;
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-plat-trans',
+                  workspace_id: 'ws-plat-test',
+                  status: 'succeeded',
+                  type: 'agent_task',
+                  output: completedOutput,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return { rows: [{ id: 'ws-plat-test', github_user_id: 'gh-test-owner' }] };
+          }
+          if (sql.includes('FROM app.connections')) {
+            return {
+              rows: [
+                {
+                  id: 'conn-liara-1',
+                  workspace_id: 'ws-plat-test',
+                  name: 'Liara',
+                  provider: 'liara',
+                  status: 'active',
+                  active_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connection_credential_versions')) {
+            return {
+              rows: [
+                {
+                  id: 'cred-1',
+                  workspace_id: 'ws-plat-test',
+                  connection_id: 'conn-liara-1',
+                  version: 1,
+                  algorithm: 'aes-256-gcm',
+                  ciphertext: mockLiaraEncrypted.ciphertext,
+                  iv: mockLiaraEncrypted.iv,
+                  tag: mockLiaraEncrypted.tag,
+                  key_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('SELECT COALESCE(MAX(seq), 0) + 1')) {
+            return { rows: [{ next_seq: 1 }] };
+          }
+          if (sql.includes('INSERT INTO app.run_events')) {
+            return { rows: [{ id: 'evt-1', seq: 1 }] };
+          }
+          return { rows: [] };
+        };
+
+        const mockPool = {
+          query: vi.fn(queryHandler),
+          connect: vi.fn(async () => ({
+            query: vi.fn(queryHandler),
+            release: vi.fn(),
+          })),
+        } as any;
+
+        const mockRunner: AgentRunner = async (opts) => {
+          // Verify propose_deployment schema does NOT expose previousPlatform to model
+          const deployTool = opts.tools.find((t) => t.name === 'propose_deployment');
+          expect(deployTool).toBeDefined();
+          expect((deployTool!.schema.properties as any).previousPlatform).toBeUndefined();
+
+          // 1. Inspect repo
+          const inspectTool = opts.tools.find((t) => t.name === 'inspect_repository');
+          await inspectTool!.execute({ owner: 'acme', repo: 'app' });
+
+          // 2. Propose docker deployment on existing next app; model attempts to inject bogus previousPlatform: 'django'
+          const propResult = await deployTool!.execute({
+            appId: 'laira-copilot-e2e-1023',
+            platform: 'docker',
+            port: 3000,
+            ...({ previousPlatform: 'django' } as any),
+          } as any);
+
+          expect(propResult).toHaveProperty('proposalHash');
+          return {
+            success: true,
+            interrupted: false,
+            message: 'Platform transition proposed',
+            usage: { promptTokens: 50, completionTokens: 50, totalTokens: 100, callsCount: 2 },
+            toolTrace: [],
+          };
+        };
+
+        const result = await executeAgentTaskRun(mockPool, 'worker-test', 'run-deploy-plat-trans', 30, {
+          runner: mockRunner,
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                project: {
+                  _id: 'proj_e2e_1023',
+                  project_id: 'laira-copilot-e2e-1023',
+                  type: 'next', // Existing app type is 'next'
+                  status: 'running',
+                },
+              }),
+              { status: 200, headers: { 'content-type': 'application/json' } }
+            ),
+          sourceFetcher: async () => ({
+            commit: 'c'.repeat(40),
+            inventory: {
+              files: [
+                {
+                  path: 'Dockerfile',
+                  bytes: Buffer.from('FROM node:20-alpine\nCMD ["node"]'),
+                },
+              ],
+              archiveDigest: 'sha256:' + 'd'.repeat(64),
+              archiveBytes: 50,
+              expandedBytes: 50,
+              entryCount: 1,
+              excludedCount: 0,
+              oversizedCount: 0,
+            },
+            bundle: {
+              archiveBytes: new Uint8Array([4, 5, 6]),
+              bundleDigest: `sha256:${crypto.createHash('sha256').update(new Uint8Array([4, 5, 6])).digest('hex')}`,
+              filesCount: 1,
+              totalBytes: 3,
+            },
+            repo: {
+              owner: 'acme',
+              repo: 'app',
+              ref: 'main',
+            },
+          }),
+        });
+
+        expect(result.run.status).toBe('succeeded');
+        expect(completedOutput.proposedAction).toBeDefined();
+        expect(completedOutput.proposedAction.kind).toBe('deploy');
+        expect(completedOutput.proposedAction.platform).toBe('docker');
+        // Authoritative previousPlatform from Liara projectDetail ('next'), ignoring model's bogus 'django'
+        expect(completedOutput.proposedAction.previousPlatform).toBe('next');
+        const expectedHash = hashDeploymentProposal(completedOutput.proposedAction);
+        expect(completedOutput.proposalHash).toBe(expectedHash);
+      });
+
       it('propose_deployment binds build.location and platformConfig strictly from inspected liara.json', async () => {
         let runStatus = 'queued';
         let completedOutput: any = null;

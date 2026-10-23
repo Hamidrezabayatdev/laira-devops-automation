@@ -151,6 +151,7 @@ export const DeployProposalSchema = z
       .max(63, 'appId cannot exceed 63 characters')
       .regex(/^[a-z0-9-]+$/, 'appId must be lowercase alphanumeric with hyphens'),
     platform: LiaraPlatformSchema,
+    previousPlatform: LiaraPlatformSchema.optional(),
     port: z
       .number()
       .int('port must be an integer')

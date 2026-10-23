@@ -612,7 +612,9 @@ export function AssistantSidebar({
                         <div className="flex items-center justify-between">
                           <span className="text-zinc-400">پلتفرم و پورت:</span>
                           <span className="font-mono text-zinc-200" dir="ltr">
-                            {msg.proposedAction.platform}:{msg.proposedAction.port}
+                            {msg.proposedAction.previousPlatform
+                              ? `${msg.proposedAction.previousPlatform} → ${msg.proposedAction.platform}:${msg.proposedAction.port}`
+                              : `${msg.proposedAction.platform}:${msg.proposedAction.port}`}
                           </span>
                         </div>
                         <div className="flex items-center justify-between">

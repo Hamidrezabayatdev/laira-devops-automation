@@ -3,6 +3,8 @@ import assert from 'node:assert';
 import {
   LiaraOperationalAdapter,
   redactLogSecrets,
+  SOURCE_ID_REGEX,
+  STRICT_ID_REGEX,
   type LiaraOperationAuthority,
 } from '../src/liara/operational.ts';
 import { CANARY_SECRETS, RAW_LIARA_RELEASES_RESPONSE } from '../src/fixtures/liara-fixtures.ts';
@@ -1652,6 +1654,256 @@ describe('Liara Operational & Observation Adapter', () => {
     assert.strictEqual(outcome.status, 'unknown');
     if (outcome.status === 'unknown') {
       assert.strictEqual(outcome.code, 'TIMEOUT_AFTER_DISPATCH');
+    }
+  });
+
+  it('accepts dotted opaque sourceID in uploadSource and forwards it in createRelease (SOURCE_ID_REGEX)', async () => {
+    let capturedReleaseBody: any;
+    let uploadCallCount = 0;
+    let releaseCallCount = 0;
+
+    const dottedSourceId = 'uuid-440abc-5678.source.tar.gz';
+
+    const mockFetch: typeof fetch = async (input, init) => {
+      const urlStr = input.toString();
+      if (urlStr.includes('/sources')) {
+        uploadCallCount++;
+        return new Response(JSON.stringify({ sourceID: dottedSourceId }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (urlStr.includes('/releases')) {
+        releaseCallCount++;
+        capturedReleaseBody = JSON.parse(init?.body as string);
+        return new Response(
+          JSON.stringify({
+            releaseID: 'rel_release123456789',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    // 1. uploadSource accepts dotted sourceID matching SOURCE_ID_REGEX
+    const uploadOutcome = await adapter.uploadSource(
+      {
+        appSlug: 'my-app',
+        sourceArchiveBytes: new Uint8Array([0x1f, 0x8b, 0x08, 0x00]),
+        filename: 'source.tar.gz',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(uploadOutcome.status, 'accepted');
+    if (uploadOutcome.status === 'accepted') {
+      assert.strictEqual(uploadOutcome.data.sourceId, dottedSourceId);
+    }
+    assert.strictEqual(uploadCallCount, 1);
+
+    // 2. createRelease accepts dotted sourceId and dispatches it in wire payload
+    const releaseOutcome = await adapter.createRelease(
+      {
+        appSlug: 'my-app',
+        sourceId: dottedSourceId,
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(releaseOutcome.status, 'accepted');
+    if (releaseOutcome.status === 'accepted') {
+      assert.strictEqual(releaseOutcome.data.releaseId, 'rel_release123456789');
+    }
+    assert.strictEqual(releaseCallCount, 1);
+    assert.strictEqual(capturedReleaseBody.sourceID, dottedSourceId);
+
+    // 3. Verify SOURCE_ID_REGEX accepts up to 256 chars with dots, hyphens, underscores
+    const maxLenSourceId = 'a'.repeat(240) + '_pkg-v1.0.tar.gz';
+    assert.strictEqual(maxLenSourceId.length, 256);
+    assert.strictEqual(SOURCE_ID_REGEX.test(maxLenSourceId), true);
+  });
+
+  it('sanitizes malformed upload sourceID into safe diagnostic metadata without leaking raw values or canary tokens', async () => {
+    const testCases: Array<{
+      body: Record<string, unknown>;
+      expectedSubstrings: string[];
+      prohibitedSubstrings: string[];
+    }> = [
+      {
+        // Disallowed chars with canary token
+        body: {
+          sourceID: `invalid$token-${CANARY_SECRETS.apiToken}`,
+          status: 'success',
+          secret_deploy_token: CANARY_SECRETS.jwtSecret,
+          untrusted_meta: 'sensitive-internal-id',
+        },
+        expectedSubstrings: [
+          'type: string',
+          'hasDisallowedChars',
+          'keys: sourceID,status',
+        ],
+        prohibitedSubstrings: [
+          CANARY_SECRETS.apiToken,
+          CANARY_SECRETS.jwtSecret,
+          'invalid$token',
+          'secret_deploy_token',
+          'untrusted_meta',
+          'sensitive-internal-id',
+        ],
+      },
+      {
+        // Slash path traversal
+        body: {
+          sourceID: `path/traversal/${CANARY_SECRETS.dbPassword}`,
+        },
+        expectedSubstrings: ['type: string', 'hasSlash'],
+        prohibitedSubstrings: [CANARY_SECRETS.dbPassword, 'traversal'],
+      },
+      {
+        // Whitespace
+        body: {
+          sourceID: 'invalid id with spaces',
+        },
+        expectedSubstrings: ['type: string', 'hasWhitespace'],
+        prohibitedSubstrings: ['invalid id with spaces'],
+      },
+      {
+        // Exceeds 256 characters
+        body: {
+          sourceID: 'a'.repeat(300),
+        },
+        expectedSubstrings: ['type: string', 'len: 300', 'lenExceeds256'],
+        prohibitedSubstrings: ['a'.repeat(20)],
+      },
+      {
+        // Non-string (e.g. object containing canary)
+        body: {
+          sourceID: { nestedSecret: CANARY_SECRETS.apiToken },
+          message: 'unexpected format',
+        },
+        expectedSubstrings: ['type: object', 'keys: sourceID,message'],
+        prohibitedSubstrings: [CANARY_SECRETS.apiToken, 'nestedSecret'],
+      },
+      {
+        // Non-string number
+        body: {
+          sourceID: 123456789,
+        },
+        expectedSubstrings: ['type: number', 'keys: sourceID'],
+        prohibitedSubstrings: ['123456789'],
+      },
+    ];
+
+    for (const tc of testCases) {
+      const mockFetch: typeof fetch = async () => {
+        return new Response(JSON.stringify(tc.body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      };
+
+      const adapter = new LiaraOperationalAdapter({
+        apiKey: 'test-token',
+        fetchFn: mockFetch,
+      });
+
+      const outcome = await adapter.uploadSource(
+        {
+          appSlug: 'test-app',
+          sourceArchiveBytes: new Uint8Array([0x1f, 0x8b, 0x08, 0x00]),
+        },
+        validAuthority
+      );
+
+      assert.strictEqual(outcome.status, 'unknown');
+      if (outcome.status === 'unknown') {
+        assert.strictEqual(outcome.code, 'MALFORMED_RESPONSE_UNCERTAIN');
+
+        for (const expected of tc.expectedSubstrings) {
+          assert(
+            outcome.safeMessage.includes(expected),
+            `safeMessage "${outcome.safeMessage}" must include "${expected}"`
+          );
+        }
+
+        const serialized = JSON.stringify(outcome);
+        for (const prohibited of tc.prohibitedSubstrings) {
+          assert(
+            !serialized.includes(prohibited),
+            `Serialized outcome must NEVER leak prohibited value "${prohibited}"`
+          );
+        }
+      }
+    }
+  });
+
+  it('preserves STRICT_ID_REGEX for releaseId and appSlug and strictly rejects dotted IDs', async () => {
+    // 1. STRICT_ID_REGEX rejects dots, slashes, and oversized strings
+    assert.strictEqual(STRICT_ID_REGEX.test('release.with.dots'), false);
+    assert.strictEqual(STRICT_ID_REGEX.test('release/with/slashes'), false);
+    assert.strictEqual(STRICT_ID_REGEX.test('valid-release_123'), true);
+    assert.strictEqual(STRICT_ID_REGEX.test('a'.repeat(129)), false);
+
+    // 2. In contrast, SOURCE_ID_REGEX allows dots and up to 256 chars
+    assert.strictEqual(SOURCE_ID_REGEX.test('release.with.dots'), true);
+    assert.strictEqual(SOURCE_ID_REGEX.test('a'.repeat(200)), true);
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+    });
+
+    // 3. getReleaseDetail rejects dotted releaseId before dispatch
+    await assert.rejects(
+      async () => {
+        await adapter.getReleaseDetail('my-app', 'release.dotted.123');
+      },
+      /Valid strict releaseId is required/
+    );
+
+    // 4. getBoundedLogs rejects dotted releaseId before dispatch
+    await assert.rejects(
+      async () => {
+        await adapter.getBoundedLogs('my-app', { releaseId: 'release.dotted.123' });
+      },
+      /Valid strict releaseId is required/
+    );
+
+    // 5. createRelease rejects malformed releaseId returned by server with STRICT_ID_REGEX
+    const mockFetchDottedRelease: typeof fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          releaseID: 'rel.dotted.invalid',
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const adapterDotted = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetchDottedRelease,
+    });
+
+    const releaseOutcome = await adapterDotted.createRelease(
+      {
+        appSlug: 'my-app',
+        sourceId: 'valid-source-id.tar.gz',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(releaseOutcome.status, 'unknown');
+    if (releaseOutcome.status === 'unknown') {
+      assert.strictEqual(releaseOutcome.code, 'MALFORMED_RESPONSE_UNCERTAIN');
+      assert.strictEqual(
+        releaseOutcome.safeMessage,
+        'Liara API returned unexpected create release payload; status uncertain'
+      );
     }
   });
 });

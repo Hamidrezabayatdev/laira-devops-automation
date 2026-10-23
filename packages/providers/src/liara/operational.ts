@@ -49,7 +49,8 @@ const MAX_SOURCE_ARCHIVE_BYTES = 50 * 1024 * 1024; // 50 MiB strict ceiling for 
 const SLUG_REGEX = /^[a-z0-9-_]+$/i;
 const MAX_SLUG_LENGTH = 64;
 
-const STRICT_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+export const STRICT_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+export const SOURCE_ID_REGEX = /^[a-zA-Z0-9_.-]{1,256}$/;
 
 export const MAX_RUNTIME_ENVS_COUNT = 40;
 export const MAX_RUNTIME_ENVS_BYTES = 32 * 1024; // 32 KiB limit
@@ -1351,17 +1352,35 @@ export class LiaraOperationalAdapter {
         true
       );
 
-      // Strict validation of sourceID: string matching [A-Za-z0-9_-]{1,128} (never accept objects or coercion)
+      // Strict validation of sourceID: bounded opaque identifier matching [a-zA-Z0-9_.-]{1,256}
       const rawSourceId =
         typeof data === 'object' && data !== null && 'sourceID' in data
           ? (data as Record<string, unknown>).sourceID
           : undefined;
 
-      if (typeof rawSourceId !== 'string' || !STRICT_ID_REGEX.test(rawSourceId)) {
+      if (typeof rawSourceId !== 'string' || !SOURCE_ID_REGEX.test(rawSourceId)) {
+        const ALLOWED_BODY_KEYS = new Set(['sourceID', 'status', 'message', 'statusCode', 'data', 'id', 'name']);
+        const presentKeys = typeof data === 'object' && data !== null
+          ? Object.keys(data as object).filter((k) => ALLOWED_BODY_KEYS.has(k))
+          : [];
+
+        const diagParts: string[] = [`type: ${typeof rawSourceId}`];
+        if (typeof rawSourceId === 'string') {
+          diagParts.push(`len: ${rawSourceId.length}`);
+          if (rawSourceId.includes('.')) diagParts.push('hasDot');
+          if (rawSourceId.includes('/') || rawSourceId.includes('\\')) diagParts.push('hasSlash');
+          if (/\s/.test(rawSourceId)) diagParts.push('hasWhitespace');
+          if (/[^a-zA-Z0-9_.-]/.test(rawSourceId)) diagParts.push('hasDisallowedChars');
+          if (rawSourceId.length > 256) diagParts.push('lenExceeds256');
+        }
+        if (presentKeys.length > 0) {
+          diagParts.push(`keys: ${presentKeys.join(',')}`);
+        }
+
         return {
           status: 'unknown',
           code: 'MALFORMED_RESPONSE_UNCERTAIN',
-          safeMessage: 'Liara API returned unexpected source upload payload; status uncertain',
+          safeMessage: `Liara API returned unexpected source upload payload (sourceID ${diagParts.join('; ')}); status uncertain`,
           correlationId,
         };
       }
@@ -1391,7 +1410,7 @@ export class LiaraOperationalAdapter {
     if (
       !params.sourceId ||
       typeof params.sourceId !== 'string' ||
-      !STRICT_ID_REGEX.test(params.sourceId.trim())
+      !SOURCE_ID_REGEX.test(params.sourceId.trim())
     ) {
       throw new Error('Valid strict sourceId is required to create a release');
     }

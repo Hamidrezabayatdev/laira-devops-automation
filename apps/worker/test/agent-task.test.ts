@@ -22,7 +22,11 @@ import {
   hashDeploymentProposal,
   DeployProposalSchema,
   RestartProposalSchema,
+  CreateAppProposalSchema,
+  ApprovedAppPlanSchema,
   type DeployProposal,
+  type CreateAppProposal,
+  type ApprovedAppPlan,
 } from '@laira/domain';
 import type { AgentTool, RunDevOpsAgentOptions } from '@laira/agent/types';
 
@@ -120,6 +124,34 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
       expect(parsed.kind).toBe('restart');
       const hash = hashDeploymentProposal(parsed);
       expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('validates create_app proposal schema and computes canonical hash', () => {
+      const createProp: CreateAppProposal = {
+        kind: 'create_app',
+        connectionId: 'conn_create1',
+        credentialVersion: 1,
+        appId: 'brand-new-app',
+        platform: 'node',
+        planId: 'standard-base-g2',
+        bundlePlanId: 'basic',
+        cost: {
+          currency: 'IRR',
+          hourly: 31944.4,
+          monthly: 22999968,
+          sourceUrl: 'https://api.liara.ir/v1/me',
+          checkedAt: '2026-10-23T00:00:00.000Z',
+        },
+      };
+
+      const parsed = CreateAppProposalSchema.parse(createProp);
+      expect(parsed.kind).toBe('create_app');
+      expect(parsed.bundlePlanId).toBe('basic');
+      const hash = hashDeploymentProposal(parsed);
+      expect(hash).toMatch(/^[0-9a-f]{64}$/);
+
+      // Re-hash is deterministic
+      expect(hashDeploymentProposal({ ...parsed })).toBe(hash);
     });
   });
 
@@ -737,6 +769,877 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
         if (origDemoOwner) process.env.DEMO_OWNER_GITHUB_ID = origDemoOwner;
         else delete process.env.DEMO_OWNER_GITHUB_ID;
       }
+    });
+
+    it('configures propose_app_creation with strict server-controlled catalog and enforces all validation gates', async () => {
+      const origBoxKey = process.env.BOX_API_KEY;
+      const origDemoOwner = process.env.DEMO_OWNER_GITHUB_ID;
+      const origMasterKey = process.env.ENCRYPTION_MASTER_KEY;
+
+      process.env.BOX_API_KEY = 'sk-mock-demo-key-valid';
+      process.env.DEMO_OWNER_GITHUB_ID = 'gh-test-owner';
+      process.env.ENCRYPTION_MASTER_KEY = TEST_ENCRYPTION_KEY.toString('base64');
+
+      const mockEncrypted = encryptCredential(
+        JSON.stringify({ apiKey: 'mock-liara-key', teamId: 'team-mock-1' }),
+        TEST_ENCRYPTION_KEY,
+        { workspaceId: 'ws-app-creation', connectionId: 'conn-liara-1', version: '1', keyVersion: 1 }
+      );
+
+      try {
+        let isClaimed = false;
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-app-creation',
+                  workspace_id: 'ws-app-creation',
+                  status: isClaimed ? 'running' : 'queued',
+                  claimed_by: isClaimed ? 'worker-test' : null,
+                  type: 'agent_task',
+                  input: { task: 'Create app' },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            isClaimed = true;
+            return {
+              rows: [
+                {
+                  id: 'run-app-creation',
+                  workspace_id: 'ws-app-creation',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'succeeded'")) {
+            return {
+              rows: [
+                {
+                  id: 'run-app-creation',
+                  workspace_id: 'ws-app-creation',
+                  status: 'succeeded',
+                  type: 'agent_task',
+                  input: {},
+                  output: params ? params[0] : {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('heartbeat_at = NOW()')) {
+            return {
+              rows: [
+                {
+                  id: 'run-app-creation',
+                  workspace_id: 'ws-app-creation',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return {
+              rows: [
+                {
+                  id: 'ws-app-creation',
+                  github_user_id: 'gh-test-owner',
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connections')) {
+            return {
+              rows: [
+                {
+                  id: 'conn-liara-1',
+                  workspace_id: 'ws-app-creation',
+                  name: 'Liara',
+                  provider: 'liara',
+                  status: 'active',
+                  active_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connection_credential_versions')) {
+            return {
+              rows: [
+                {
+                  id: 'cred-1',
+                  workspace_id: 'ws-app-creation',
+                  connection_id: 'conn-liara-1',
+                  version: 1,
+                  algorithm: 'aes-256-gcm',
+                  ciphertext: mockEncrypted.ciphertext,
+                  iv: mockEncrypted.iv,
+                  tag: mockEncrypted.tag,
+                  key_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('SELECT COALESCE(MAX(seq), 0) + 1')) {
+            return { rows: [{ next_seq: 1 }] };
+          }
+          if (sql.includes('INSERT INTO app.run_events')) {
+            return { rows: [{ id: 'evt-1', seq: 1 }] };
+          }
+          return { rows: [] };
+        };
+
+        const mockClient = {
+          query: queryHandler,
+          release: () => {},
+        };
+
+        const mockPool = {
+          query: queryHandler,
+          connect: async () => mockClient,
+        } as unknown as pg.Pool;
+
+        const approvedPlan: ApprovedAppPlan = {
+          planId: 'standard-base-g2',
+          bundlePlanId: 'basic',
+          cost: {
+            currency: 'IRR',
+            hourly: 31944.4,
+            monthly: 22999968,
+            sourceUrl: 'https://api.liara.ir/v1/me',
+            checkedAt: new Date().toISOString(),
+          },
+        };
+
+        const mockRunner: AgentRunner = async (opts) => {
+          const createTool = opts.tools.find((t) => t.name === 'propose_app_creation');
+          expect(createTool).toBeDefined();
+
+          // 1. Tool schema strictly accepts ONLY appId, platform, planId (cost is NEVER model-controlled)
+          expect(createTool!.schema.properties).toHaveProperty('appId');
+          expect(createTool!.schema.properties).toHaveProperty('platform');
+          expect(createTool!.schema.properties).toHaveProperty('planId');
+          expect((createTool!.schema.properties as any).cost).toBeUndefined();
+
+          // 2. Unapproved plan rejection
+          const unapprovedRes = await createTool!.execute({
+            appId: 'test-app',
+            platform: 'node',
+            planId: 'unknown-expensive-plan',
+          });
+          expect(unapprovedRes).toMatchObject({ error: 'PLAN_NOT_APPROVED' });
+
+          // 3. Invalid platform rejection
+          const invalidPlatformRes = await createTool!.execute({
+            appId: 'test-app',
+            platform: 'invalid-platform',
+            planId: 'standard-base-g2',
+          });
+          expect(invalidPlatformRes).toMatchObject({ error: 'INVALID_PLATFORM' });
+
+          // 4. Valid invocation creates exact proposal with server-controlled cost and bundlePlanId
+          const successRes = await createTool!.execute({
+            appId: 'test-app',
+            platform: 'node',
+            planId: 'standard-base-g2',
+          });
+          expect(successRes.success).toBe(true);
+          expect(successRes.status).toBe('proposal_ready');
+          expect(successRes.proposalHash).toMatch(/^[0-9a-f]{64}$/);
+          expect(successRes.summary).toMatchObject({
+            appId: 'test-app',
+            platform: 'node',
+            planId: 'standard-base-g2',
+            bundlePlanId: 'basic',
+            cost: approvedPlan.cost,
+          });
+
+          return {
+            success: true,
+            interrupted: false,
+            message: 'App creation proposal generated',
+            usage: { promptTokens: 50, completionTokens: 20, totalTokens: 70, callsCount: 1 },
+            toolTrace: [],
+          };
+        };
+
+        const result = await executeAgentTaskRun(mockPool, 'worker-test', 'run-app-creation', 30, {
+          runner: mockRunner,
+          appCreationPlans: [approvedPlan],
+        });
+
+        expect(result.run.status).toBe('succeeded');
+      } finally {
+        if (origBoxKey) process.env.BOX_API_KEY = origBoxKey;
+        else delete process.env.BOX_API_KEY;
+        if (origDemoOwner) process.env.DEMO_OWNER_GITHUB_ID = origDemoOwner;
+        else delete process.env.DEMO_OWNER_GITHUB_ID;
+        if (origMasterKey) process.env.ENCRYPTION_MASTER_KEY = origMasterKey;
+        else delete process.env.ENCRYPTION_MASTER_KEY;
+      }
+    });
+
+    it('propose_app_creation fails closed with CATALOG_UNAVAILABLE when no plans configured', async () => {
+      const origBoxKey = process.env.BOX_API_KEY;
+      const origDemoOwner = process.env.DEMO_OWNER_GITHUB_ID;
+      const origMasterKey = process.env.ENCRYPTION_MASTER_KEY;
+      const origEnvPlans = process.env.LIARA_APPROVED_APP_PLANS_JSON;
+
+      process.env.BOX_API_KEY = 'sk-mock-demo-key-valid';
+      process.env.DEMO_OWNER_GITHUB_ID = 'gh-test-owner';
+      process.env.ENCRYPTION_MASTER_KEY = TEST_ENCRYPTION_KEY.toString('base64');
+      delete process.env.LIARA_APPROVED_APP_PLANS_JSON;
+
+      const mockEncrypted = encryptCredential(
+        JSON.stringify({ apiKey: 'mock-liara-key' }),
+        TEST_ENCRYPTION_KEY,
+        { workspaceId: 'ws-no-catalog', connectionId: 'conn-liara-1', version: '1', keyVersion: 1 }
+      );
+
+      try {
+        let isClaimed = false;
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-no-catalog',
+                  workspace_id: 'ws-no-catalog',
+                  status: isClaimed ? 'running' : 'queued',
+                  claimed_by: isClaimed ? 'worker-test' : null,
+                  type: 'agent_task',
+                  input: {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            isClaimed = true;
+            return {
+              rows: [
+                {
+                  id: 'run-no-catalog',
+                  workspace_id: 'ws-no-catalog',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'succeeded'")) {
+            return {
+              rows: [
+                {
+                  id: 'run-no-catalog',
+                  workspace_id: 'ws-no-catalog',
+                  status: 'succeeded',
+                  type: 'agent_task',
+                  input: {},
+                  output: params ? params[0] : {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('heartbeat_at = NOW()')) {
+            return {
+              rows: [
+                {
+                  id: 'run-no-catalog',
+                  workspace_id: 'ws-no-catalog',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {},
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return { rows: [{ id: 'ws-no-catalog', github_user_id: 'gh-test-owner' }] };
+          }
+          if (sql.includes('FROM app.connections WHERE workspace_id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'conn-liara-1',
+                  workspace_id: 'ws-no-catalog',
+                  name: 'Liara',
+                  provider: 'liara',
+                  status: 'active',
+                  active_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connections') && sql.includes('provider = $2')) {
+            return {
+              rows: [
+                {
+                  id: 'conn-liara-1',
+                  workspace_id: 'ws-no-catalog',
+                  name: 'Liara',
+                  provider: 'liara',
+                  status: 'active',
+                  active_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connection_credential_versions')) {
+            return {
+              rows: [
+                {
+                  id: 'cred-1',
+                  workspace_id: 'ws-no-catalog',
+                  connection_id: 'conn-liara-1',
+                  version: 1,
+                  algorithm: 'aes-256-gcm',
+                  ciphertext: mockEncrypted.ciphertext,
+                  iv: mockEncrypted.iv,
+                  tag: mockEncrypted.tag,
+                  key_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('SELECT COALESCE(MAX(seq), 0) + 1')) {
+            return { rows: [{ next_seq: 1 }] };
+          }
+          if (sql.includes('INSERT INTO app.run_events')) {
+            return { rows: [{ id: 'evt-1', seq: 1 }] };
+          }
+          return { rows: [] };
+        };
+
+        const mockClient = {
+          query: queryHandler,
+          release: () => {},
+        };
+
+        const mockPool = {
+          query: queryHandler,
+          connect: async () => mockClient,
+        } as unknown as pg.Pool;
+
+        const mockRunner: AgentRunner = async (opts) => {
+          const createTool = opts.tools.find((t) => t.name === 'propose_app_creation');
+          expect(createTool).toBeDefined();
+
+          const result = await createTool!.execute({
+            appId: 'my-app',
+            platform: 'node',
+            planId: 'standard-base-g2',
+          });
+          expect(result).toMatchObject({ error: 'CATALOG_UNAVAILABLE' });
+
+          return {
+            success: true,
+            interrupted: false,
+            message: 'Done',
+            usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20, callsCount: 1 },
+            toolTrace: [],
+          };
+        };
+
+        await executeAgentTaskRun(mockPool, 'worker-test', 'run-no-catalog', 30, {
+          runner: mockRunner,
+        });
+      } finally {
+        if (origBoxKey) process.env.BOX_API_KEY = origBoxKey;
+        else delete process.env.BOX_API_KEY;
+        if (origDemoOwner) process.env.DEMO_OWNER_GITHUB_ID = origDemoOwner;
+        else delete process.env.DEMO_OWNER_GITHUB_ID;
+        if (origMasterKey) process.env.ENCRYPTION_MASTER_KEY = origMasterKey;
+        else delete process.env.ENCRYPTION_MASTER_KEY;
+        if (origEnvPlans) process.env.LIARA_APPROVED_APP_PLANS_JSON = origEnvPlans;
+        else delete process.env.LIARA_APPROVED_APP_PLANS_JSON;
+      }
+    });
+
+    describe('Runtime Environment task input handling & proposal attachment', () => {
+      const origBoxKey = process.env.BOX_API_KEY;
+      const origDemoOwner = process.env.DEMO_OWNER_GITHUB_ID;
+      const origMasterKey = process.env.ENCRYPTION_MASTER_KEY;
+
+      beforeEach(() => {
+        process.env.BOX_API_KEY = 'sk-mock-demo-key-valid';
+        process.env.DEMO_OWNER_GITHUB_ID = 'gh-test-owner';
+        process.env.ENCRYPTION_MASTER_KEY = TEST_ENCRYPTION_KEY.toString('base64');
+      });
+
+      afterEach(() => {
+        if (origBoxKey) process.env.BOX_API_KEY = origBoxKey;
+        else delete process.env.BOX_API_KEY;
+        if (origDemoOwner) process.env.DEMO_OWNER_GITHUB_ID = origDemoOwner;
+        else delete process.env.DEMO_OWNER_GITHUB_ID;
+        if (origMasterKey) process.env.ENCRYPTION_MASTER_KEY = origMasterKey;
+        else delete process.env.ENCRYPTION_MASTER_KEY;
+      });
+
+      it('fails run statically with INVALID_RUNTIME_ENVIRONMENT if run.input.runtimeEnvironment is malformed', async () => {
+        let runStatus = 'queued';
+        let failedPayload: any = null;
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-invalid-env',
+                  workspace_id: 'ws-env-test',
+                  status: runStatus,
+                  claimed_by: runStatus === 'running' ? 'worker-test' : null,
+                  type: 'agent_task',
+                  input: {
+                    runtimeEnvironment: {
+                      connectionId: 'conn-env-1',
+                      credentialVersion: 'not-a-number', // INVALID!
+                    },
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            runStatus = 'running';
+            return {
+              rows: [
+                {
+                  id: 'run-invalid-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {
+                    runtimeEnvironment: { connectionId: 'conn-env-1', credentialVersion: 'not-a-number' },
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'failed'")) {
+            runStatus = 'failed';
+            failedPayload = params ? params[0] : null;
+            return {
+              rows: [
+                {
+                  id: 'run-invalid-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'failed',
+                  type: 'agent_task',
+                  error: failedPayload,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return { rows: [{ id: 'ws-env-test', github_user_id: 'gh-test-owner' }] };
+          }
+          if (sql.includes('FROM app.connections')) {
+            return { rows: [] };
+          }
+          return { rows: [] };
+        };
+
+        const mockClient = { query: queryHandler, release: () => {} };
+        const mockPool = { query: queryHandler, connect: async () => mockClient } as unknown as pg.Pool;
+
+        const runnerCalled = vi.fn();
+        const result = await executeAgentTaskRun(mockPool, 'worker-test', 'run-invalid-env', 30, {
+          runner: runnerCalled as any,
+        });
+
+        expect(result.run.status).toBe('failed');
+        expect(runnerCalled).not.toHaveBeenCalled();
+        expect(JSON.parse(failedPayload)).toEqual(
+          expect.objectContaining({
+            code: 'INVALID_RUNTIME_ENVIRONMENT',
+          })
+        );
+      });
+
+      it('fails run statically with RUNTIME_ENVIRONMENT_UNAVAILABLE if referenced connection is not found, wrong provider, or drifted version', async () => {
+        let runStatus = 'queued';
+        let failedPayload: any = null;
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-drift-env',
+                  workspace_id: 'ws-env-test',
+                  status: runStatus,
+                  claimed_by: runStatus === 'running' ? 'worker-test' : null,
+                  type: 'agent_task',
+                  input: {
+                    runtimeEnvironment: {
+                      connectionId: 'conn-env-drift',
+                      credentialVersion: 1,
+                    },
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            runStatus = 'running';
+            return {
+              rows: [
+                {
+                  id: 'run-drift-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {
+                    runtimeEnvironment: { connectionId: 'conn-env-drift', credentialVersion: 1 },
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'failed'")) {
+            runStatus = 'failed';
+            failedPayload = params ? params[0] : null;
+            return {
+              rows: [
+                {
+                  id: 'run-drift-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'failed',
+                  type: 'agent_task',
+                  error: failedPayload,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return { rows: [{ id: 'ws-env-test', github_user_id: 'gh-test-owner' }] };
+          }
+          if (sql.includes('FROM app.connections')) {
+            if (sql.includes('id = $1') && params && params[0] === 'conn-env-drift') {
+              // Version drifted: DB has active_version 2, but input requested 1
+              return {
+                rows: [
+                  {
+                    id: 'conn-env-drift',
+                    workspace_id: 'ws-env-test',
+                    name: 'Drifted Env',
+                    provider: 'deployment_env',
+                    status: 'active',
+                    active_version: 2,
+                  },
+                ],
+              };
+            }
+            return { rows: [] };
+          }
+          return { rows: [] };
+        };
+
+        const mockClient = { query: queryHandler, release: () => {} };
+        const mockPool = { query: queryHandler, connect: async () => mockClient } as unknown as pg.Pool;
+
+        const runnerCalled = vi.fn();
+        const result = await executeAgentTaskRun(mockPool, 'worker-test', 'run-drift-env', 30, {
+          runner: runnerCalled as any,
+        });
+
+        expect(result.run.status).toBe('failed');
+        expect(runnerCalled).not.toHaveBeenCalled();
+        expect(JSON.parse(failedPayload)).toEqual(
+          expect.objectContaining({
+            code: 'RUNTIME_ENVIRONMENT_UNAVAILABLE',
+          })
+        );
+      });
+
+      it('propose_deployment binds verified runtimeEnvironment from run.input and enforces no model-supplied overrides', async () => {
+        let runStatus = 'queued';
+        let completedOutput: any = null;
+        let failedPayload: any = null;
+
+        const mockLiaraEncrypted = encryptCredential(
+          JSON.stringify({ apiKey: 'mock-liara-key' }),
+          TEST_ENCRYPTION_KEY,
+          { workspaceId: 'ws-env-test', connectionId: 'conn-liara-1', version: '1', keyVersion: 1 }
+        );
+
+        const queryHandler = async (sql: string, params?: any[]) => {
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [] };
+          if (sql.includes('FROM app.runs WHERE id = $1')) {
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-env',
+                  workspace_id: 'ws-env-test',
+                  status: runStatus,
+                  claimed_by: runStatus === 'running' ? 'worker-test' : null,
+                  type: 'agent_task',
+                  input: {
+                    repository: 'https://github.com/acme/app',
+                    runtimeEnvironment: {
+                      connectionId: 'conn-env-valid',
+                      credentialVersion: 1,
+                    },
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('claimed_by = $1')) {
+            runStatus = 'running';
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                  input: {
+                    repository: 'https://github.com/acme/app',
+                    runtimeEnvironment: {
+                      connectionId: 'conn-env-valid',
+                      credentialVersion: 1,
+                    },
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'succeeded'")) {
+            runStatus = 'succeeded';
+            completedOutput = params
+              ? (typeof params[0] === 'string' ? JSON.parse(params[0]) : params[0])
+              : null;
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'succeeded',
+                  type: 'agent_task',
+                  output: completedOutput,
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes("status = 'failed'")) {
+            runStatus = 'failed';
+            failedPayload = params ? params[0] : null;
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'failed',
+                  type: 'agent_task',
+                  error: params ? params[0] : null,
+                },
+              ],
+            };
+          }
+          if (sql.includes('UPDATE app.runs') && sql.includes('heartbeat_at = NOW()')) {
+            return {
+              rows: [
+                {
+                  id: 'run-deploy-env',
+                  workspace_id: 'ws-env-test',
+                  status: 'running',
+                  claimed_by: 'worker-test',
+                  type: 'agent_task',
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.workspaces')) {
+            return { rows: [{ id: 'ws-env-test', github_user_id: 'gh-test-owner' }] };
+          }
+          if (sql.includes('FROM app.connections')) {
+            if (sql.includes('id = $1') && params) {
+              if (params[0] === 'conn-env-valid') {
+                return {
+                  rows: [
+                    {
+                      id: 'conn-env-valid',
+                      workspace_id: 'ws-env-test',
+                      name: 'Valid Env',
+                      provider: 'deployment_env',
+                      status: 'active',
+                      active_version: 1,
+                    },
+                  ],
+                };
+              }
+              if (params[0] === 'conn-liara-1') {
+                return {
+                  rows: [
+                    {
+                      id: 'conn-liara-1',
+                      workspace_id: 'ws-env-test',
+                      name: 'Liara',
+                      provider: 'liara',
+                      status: 'active',
+                      active_version: 1,
+                    },
+                  ],
+                };
+              }
+            }
+            return {
+              rows: [
+                {
+                  id: 'conn-liara-1',
+                  workspace_id: 'ws-env-test',
+                  name: 'Liara',
+                  provider: 'liara',
+                  status: 'active',
+                  active_version: 1,
+                },
+                {
+                  id: 'conn-env-valid',
+                  workspace_id: 'ws-env-test',
+                  name: 'Valid Env',
+                  provider: 'deployment_env',
+                  status: 'active',
+                  active_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM app.connection_credential_versions')) {
+            return {
+              rows: [
+                {
+                  id: 'cred-1',
+                  workspace_id: 'ws-env-test',
+                  connection_id: 'conn-liara-1',
+                  version: 1,
+                  algorithm: 'aes-256-gcm',
+                  ciphertext: mockLiaraEncrypted.ciphertext,
+                  iv: mockLiaraEncrypted.iv,
+                  tag: mockLiaraEncrypted.tag,
+                  key_version: 1,
+                },
+              ],
+            };
+          }
+          if (sql.includes('SELECT COALESCE(MAX(seq), 0) + 1')) {
+            return { rows: [{ next_seq: 1 }] };
+          }
+          if (sql.includes('INSERT INTO app.run_events')) {
+            return { rows: [{ id: 'evt-1', seq: 1 }] };
+          }
+          return { rows: [] };
+        };
+
+        const mockClient = { query: queryHandler, release: () => {} };
+        const mockPool = { query: queryHandler, connect: async () => mockClient } as unknown as pg.Pool;
+
+        const mockRunner: AgentRunner = async (opts) => {
+          // Verify propose_deployment schema does NOT expose runtimeEnvironment to model
+          const deployTool = opts.tools.find((t) => t.name === 'propose_deployment');
+          expect(deployTool).toBeDefined();
+          expect((deployTool!.schema.properties as any).runtimeEnvironment).toBeUndefined();
+
+          // 1. Inspect repository first (required gate)
+          const inspectTool = opts.tools.find((t) => t.name === 'inspect_repository');
+          expect(inspectTool).toBeDefined();
+          const inspectRes = await inspectTool!.execute({ owner: 'acme', repo: 'app' });
+          expect(inspectRes).toHaveProperty('success', true);
+
+          // 2. Propose deployment: attempt passing rogue runtimeEnvironment via args
+          const propResult = await deployTool!.execute({
+            appId: 'acme-web',
+            platform: 'node',
+            port: 3000,
+            // Model attempts to inject rogue environment: must be ignored, only input binding used
+            ...({ runtimeEnvironment: { connectionId: 'rogue-conn', credentialVersion: 99 } } as any),
+          } as any);
+
+          expect(propResult).toHaveProperty('proposalHash');
+          return {
+            success: true,
+            interrupted: false,
+            message: 'Deployment proposed',
+            usage: { promptTokens: 50, completionTokens: 50, totalTokens: 100, callsCount: 2 },
+            toolTrace: [],
+          };
+        };
+
+        const result = await executeAgentTaskRun(mockPool, 'worker-test', 'run-deploy-env', 30, {
+          runner: mockRunner,
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                project: {
+                  _id: 'proj_123',
+                  project_id: 'acme-web',
+                  type: 'node',
+                  status: 'created',
+                },
+              }),
+              { status: 200, headers: { 'content-type': 'application/json' } }
+            ),
+          sourceFetcher: async () => ({
+            commit: 'a'.repeat(40),
+            inventory: {
+              files: [
+                {
+                  path: 'package.json',
+                  bytes: Buffer.from('{"name":"acme","scripts":{"start":"node index.js"}}'),
+                },
+              ],
+              archiveDigest: 'sha256:' + 'b'.repeat(64),
+              archiveBytes: 50,
+              expandedBytes: 50,
+              entryCount: 1,
+              excludedCount: 0,
+              oversizedCount: 0,
+            },
+            bundle: {
+              archiveBytes: new Uint8Array([1, 2, 3]),
+              bundleDigest: `sha256:${crypto.createHash('sha256').update(new Uint8Array([1, 2, 3])).digest('hex')}`,
+              filesCount: 1,
+              totalBytes: 3,
+            },
+            repo: {
+              owner: 'acme',
+              repo: 'app',
+              ref: 'main',
+            },
+          }),
+        });
+
+        expect(result.run.status).toBe('succeeded');
+        expect(completedOutput.proposedAction).toBeDefined();
+        expect(completedOutput.proposedAction.kind).toBe('deploy');
+        expect(completedOutput.proposedAction.runtimeEnvironment).toEqual({
+          connectionId: 'conn-env-valid',
+          credentialVersion: 1,
+        });
+        // Check canonical hash matches
+        const expectedHash = hashDeploymentProposal(completedOutput.proposedAction);
+        expect(completedOutput.proposalHash).toBe(expectedHash);
+      });
     });
   });
 

@@ -21,6 +21,11 @@ import type {
   AgentProgressEvent,
 } from '@/lib/agent-contract';
 
+export const ALLOWED_COST_SOURCE_URLS = new Set<string>([
+  'https://liara.ir/pricing/',
+  'https://api.liara.ir/v1/me',
+]);
+
 interface AssistantSidebarProps {
   isLiveAiActive?: boolean;
   className?: string;
@@ -582,7 +587,11 @@ export function AssistantSidebar({
                       <span>
                         {msg.proposedAction.kind === 'deploy'
                           ? 'پیشنهاد استقرار پروژه'
-                          : 'پیشنهاد راه‌اندازی مجدد سرویس'}
+                          : msg.proposedAction.kind === 'create_app'
+                          ? 'پیشنهاد ایجاد برنامه جدید'
+                          : msg.proposedAction.kind === 'restart'
+                          ? 'پیشنهاد راه‌اندازی مجدد سرویس'
+                          : 'پیشنهاد عملیات'}
                       </span>
                     </div>
                     <Badge variant="outline" className="text-[9px] text-purple-300 border-purple-400/30">
@@ -592,7 +601,9 @@ export function AssistantSidebar({
 
                   <div className="space-y-1 text-[11px] text-zinc-300">
                     <div className="flex items-center justify-between">
-                      <span className="text-zinc-400">شناسه برنامه مقصد:</span>
+                      <span className="text-zinc-400">
+                        {msg.proposedAction.kind === 'create_app' ? 'شناسه برنامه جدید:' : 'شناسه برنامه مقصد:'}
+                      </span>
                       <span className="font-mono text-purple-200" dir="ltr">{msg.proposedAction.appId}</span>
                     </div>
 
@@ -617,15 +628,85 @@ export function AssistantSidebar({
                             {msg.proposedAction.bundleDigest.slice(0, 16)}...
                           </span>
                         </div>
+                        {msg.proposedAction.runtimeEnvironment && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">محیط اجرا:</span>
+                            <span className="font-mono text-zinc-200 text-[10px]" dir="ltr">
+                              {msg.proposedAction.runtimeEnvironment.connectionId} (v{msg.proposedAction.runtimeEnvironment.credentialVersion})
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {msg.proposedAction.kind === 'create_app' && (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="text-zinc-400">پلتفرم:</span>
+                          <span className="font-mono text-zinc-200" dir="ltr">
+                            {msg.proposedAction.platform}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-zinc-400">پلن:</span>
+                          <span className="font-mono text-zinc-200" dir="ltr">
+                            {msg.proposedAction.planId} / {msg.proposedAction.bundlePlanId}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-zinc-400">هزینه ساعتی:</span>
+                          <span className="font-mono text-zinc-200" dir="ltr">
+                            {msg.proposedAction.cost.hourly} {msg.proposedAction.cost.currency}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-zinc-400">هزینه ماهانه:</span>
+                          <span className="font-mono text-zinc-200" dir="ltr">
+                            {msg.proposedAction.cost.monthly} {msg.proposedAction.cost.currency}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-zinc-400">منبع استعلام قیمت:</span>
+                          {ALLOWED_COST_SOURCE_URLS.has(msg.proposedAction.cost.sourceUrl) ? (
+                            <a
+                              href={msg.proposedAction.cost.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#28c1f5] hover:underline font-mono text-[10px] truncate max-w-[190px]"
+                              dir="ltr"
+                            >
+                              {msg.proposedAction.cost.sourceUrl}
+                            </a>
+                          ) : (
+                            <span className="font-mono text-zinc-300 text-[10px] truncate max-w-[190px]" dir="ltr">
+                              {msg.proposedAction.cost.sourceUrl}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-zinc-400">زمان استعلام هزینه:</span>
+                          <span className="font-mono text-zinc-300 text-[10px]" dir="ltr">
+                            {msg.proposedAction.cost.checkedAt}
+                          </span>
+                        </div>
                       </>
                     )}
                   </div>
 
                   {/* Explicit Cost & Disruption Warning */}
-                  <div className="rounded bg-amber-950/30 border border-amber-600/30 p-2 text-[10px] text-amber-200/90 leading-relaxed">
-                    <span className="font-bold block mb-0.5">هشدار هزینه و پایداری:</span>
-                    استقرار یا راه‌اندازی مجدد ممکن است منجر به تغییر هزینه منابع، وقفه موقت در دسترس‌پذیری سرویس یا ساخت کانتینر جدید گردد. این عملیات صرفاً با تأیید صریح شما انجام می‌شود.
-                  </div>
+                  {msg.proposedAction.kind === 'create_app' ? (
+                    <div className="rounded bg-amber-950/30 border border-amber-600/30 p-2 text-[10px] text-amber-200/90 leading-relaxed space-y-1">
+                      <span className="font-bold block mb-0.5">هشدار هزینه ادواری و ساخت برنامه:</span>
+                      <div>
+                        محاسبه و صورت‌حساب ادواری از لحظه ایجاد برنامه آغاز می‌گردد. این عملیات فاقد استقرار ضمنی سورس‌کد بوده و هیچ پایگاه‌داده یا دیسک ذخیره‌سازی اضافی به همراه برنامه ایجاد نمی‌شود. این عملیات صرفاً با تأیید صریح شما انجام می‌پذیرد.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded bg-amber-950/30 border border-amber-600/30 p-2 text-[10px] text-amber-200/90 leading-relaxed">
+                      <span className="font-bold block mb-0.5">هشدار هزینه و پایداری:</span>
+                      استقرار یا راه‌اندازی مجدد ممکن است منجر به تغییر هزینه منابع، وقفه موقت در دسترس‌پذیری سرویس یا ساخت کانتینر جدید گردد. این عملیات صرفاً با تأیید صریح شما انجام می‌شود.
+                    </div>
+                  )}
 
                   {/* Execution Status after approval */}
                   {msg.executionRunId && (

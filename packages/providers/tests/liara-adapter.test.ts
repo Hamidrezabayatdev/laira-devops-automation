@@ -114,6 +114,76 @@ describe('Liara Safe Read-Only Adapter', () => {
     assert.strictEqual(releases[0].tag, 'v1.2.0');
   });
 
+  it('lists projects supporting honest CLI wire shape { projects: [...] } as well as docs array shape', async () => {
+    // Honest CLI response object: { projects: [...] }
+    const cliWireResponse = { projects: RAW_LIARA_PROJECTS_RESPONSE };
+
+    const mockFetchCli: typeof fetch = async () => {
+      return new Response(JSON.stringify(cliWireResponse), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const clientCli = new LiaraClient({
+      apiKey: 'test-token',
+      fetchFn: mockFetchCli,
+    });
+
+    const appsCli = await clientCli.listProjects();
+    assert.strictEqual(appsCli.length, 2);
+    assert.strictEqual(appsCli[0].projectId, 'my-frontend-app');
+    assert.strictEqual(appsCli[1].projectId, 'my-backend-api');
+
+    // Docs fallback response array: [...]
+    const mockFetchDocs: typeof fetch = async () => {
+      return new Response(JSON.stringify(RAW_LIARA_PROJECTS_RESPONSE), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const clientDocs = new LiaraClient({
+      apiKey: 'test-token',
+      fetchFn: mockFetchDocs,
+    });
+
+    const appsDocs = await clientDocs.listProjects();
+    assert.strictEqual(appsDocs.length, 2);
+    assert.strictEqual(appsDocs[0].projectId, 'my-frontend-app');
+  });
+
+  it('retrieves single release detail by releaseId via GET /v1/releases/{releaseId}', async () => {
+    let capturedUrl = '';
+
+    const mockFetch: typeof fetch = async (input) => {
+      capturedUrl = input.toString();
+      return new Response(
+        JSON.stringify({
+          release: {
+            _id: 'release-test-999',
+            project_id: 'my-app',
+            state: 'READY',
+            tag: 'v2.0.0',
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const client = new LiaraClient({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    const release = await client.getReleaseDetail('release-test-999');
+    assert.strictEqual(capturedUrl, 'https://api.liara.ir/v1/releases/release-test-999');
+    assert.strictEqual(release.id, 'release-test-999');
+    assert.strictEqual(release.projectId, 'my-app');
+    assert.strictEqual(release.state, 'READY');
+    assert.strictEqual(release.tag, 'v2.0.0');
+  });
+
   it('appends and overrides teamID query parameter per connection to all requests', async () => {
     const urls: string[] = [];
 

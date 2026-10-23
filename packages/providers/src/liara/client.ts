@@ -490,6 +490,33 @@ export class LiaraClient {
   }
 
   /**
+   * Get release detail by releaseId
+   * GET /v1/releases/{releaseId}
+   */
+  async getReleaseDetail(releaseId: string): Promise<SafeLiaraRelease> {
+    if (!releaseId || typeof releaseId !== 'string' || !releaseId.trim()) {
+      throw new Error('Valid releaseId is required');
+    }
+
+    const raw = await this.safeFetch(`/v1/releases/${encodeURIComponent(releaseId.trim())}`);
+    const release = (typeof raw === 'object' && raw !== null && 'release' in raw)
+      ? (raw as any).release
+      : raw;
+
+    if (typeof release !== 'object' || release === null || Array.isArray(release)) {
+      throw new LiaraApiError({
+        code: 'MALFORMED_PAYLOAD',
+        statusCode: 200,
+        safeMessage: 'Liara API release detail returned unexpected payload structure',
+        correlationId: crypto.randomUUID(),
+        retryable: false,
+      });
+    }
+
+    return toSafeLiaraRelease(release);
+  }
+
+  /**
    * Returns honest capability status for Phase 0
    */
   getCapabilities(): SafeLiaraCapability[] {

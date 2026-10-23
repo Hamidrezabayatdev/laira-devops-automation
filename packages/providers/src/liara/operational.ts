@@ -27,6 +27,7 @@
 import {
   LIARA_API_ORIGIN,
   type LiaraConnectionConfig,
+  type SafeLiaraApp,
   type SafeLiaraAppDetail,
   type SafeLiaraRelease,
 } from './types.js';
@@ -49,6 +50,15 @@ const SLUG_REGEX = /^[a-z0-9-_]+$/i;
 const MAX_SLUG_LENGTH = 64;
 
 const STRICT_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
+export const MAX_RUNTIME_ENVS_COUNT = 40;
+export const MAX_RUNTIME_ENVS_BYTES = 32 * 1024; // 32 KiB limit
+export const RUNTIME_ENV_KEY_REGEX = /^[A-Z][A-Z0-9_]{0,127}$/;
+export const RESERVED_RUNTIME_ENV_KEYS = new Set([
+  'NODE_OPTIONS',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+]);
 
 export type LiaraMutationOperation =
   | 'create_app'
@@ -83,6 +93,7 @@ export interface CreateAppParams {
   readonly appSlug: string;
   readonly platform: string;
   readonly planId: string; // Explicit required plan; no default assumptions
+  readonly bundlePlanId?: string; // Optional bundle plan ID
 }
 
 export interface UploadSourceParams {
@@ -96,6 +107,7 @@ export interface CreateReleaseParams {
   readonly sourceId: string;
   readonly port?: number;
   readonly platform?: string;
+  readonly runtimeEnvs?: readonly { readonly key: string; readonly value: string }[];
 }
 
 export interface RestartAppParams {
@@ -154,7 +166,71 @@ export interface LiaraLogQueryOptions {
   readonly since?: string | number;
   readonly maxLines?: number;
   readonly maxBodyBytes?: number;
+  readonly releaseId?: string;
+  readonly lastLines?: boolean;
 }
+
+/**
+ * Safe terminal reason codes.
+ * Raw provider fail reasons are NEVER reflected because they could contain
+ * internal stack traces, environment variables, or canary credentials.
+ */
+export const SAFE_TERMINAL_FAIL_REASONS = [
+  'DISK_NOT_FOUND',
+  'BUILD_FAILED',
+  'HEALTH_CHECK_FAILED',
+  'DEPLOYMENT_TIMEOUT',
+  'DEPLOYMENT_CANCELED',
+  'INVALID_PORT',
+  'OUT_OF_MEMORY',
+  'RELEASE_FAILED',
+] as const;
+
+export type SafeTerminalFailReason = (typeof SAFE_TERMINAL_FAIL_REASONS)[number];
+
+export function sanitizeReleaseFailReason(rawReason: unknown): SafeTerminalFailReason {
+  if (typeof rawReason !== 'string' || !rawReason.trim()) {
+    return 'RELEASE_FAILED';
+  }
+  const trimmed = rawReason.trim().toLowerCase();
+  if (trimmed.startsWith('disk_not_found') || trimmed.includes('disk')) {
+    return 'DISK_NOT_FOUND';
+  }
+  if (trimmed.startsWith('build_failed') || trimmed.includes('build failed') || trimmed.includes('build error')) {
+    return 'BUILD_FAILED';
+  }
+  if (trimmed.startsWith('health_check_failed') || trimmed.includes('unhealthy') || trimmed.includes('health')) {
+    return 'HEALTH_CHECK_FAILED';
+  }
+  if (trimmed.startsWith('timeout') || trimmed.includes('timed out') || trimmed.includes('timeout')) {
+    return 'DEPLOYMENT_TIMEOUT';
+  }
+  if (trimmed.startsWith('canceled') || trimmed.startsWith('cancelled') || trimmed.includes('cancel')) {
+    return 'DEPLOYMENT_CANCELED';
+  }
+  if (trimmed.startsWith('port_not_found') || trimmed.includes('port')) {
+    return 'INVALID_PORT';
+  }
+  if (trimmed.startsWith('out_of_memory') || trimmed.includes('oom') || trimmed.includes('memory')) {
+    return 'OUT_OF_MEMORY';
+  }
+  return 'RELEASE_FAILED';
+}
+
+const ALLOWED_RELEASE_STATES = new Set([
+  'PENDING',
+  'INITIALIZING',
+  'BUILDING',
+  'PUSHING',
+  'PUSHED',
+  'DEPLOYING',
+  'READY',
+  'UNHEALTHY',
+  'FAILED',
+  'CANCELED',
+  'TIMEDOUT',
+  'STOPPED',
+]);
 
 /**
  * Redacts potential secrets, credentials, tokens, and DB connection strings from untrusted text.
@@ -235,6 +311,64 @@ export class LiaraOperationalAdapter {
       throw new Error('Invalid appSlug: must be 1-64 alphanumeric characters, hyphens, or underscores');
     }
     return trimmed;
+  }
+
+  /**
+   * Validates runtime environment variables before release dispatch.
+   * Enforces:
+   * 1. Max 40 keys
+   * 2. Key format: /^[A-Z][A-Z0-9_]{0,127}$/
+   * 3. Total size <= 32 KiB
+   * 4. No reserved keys: NODE_OPTIONS, LD_PRELOAD, LD_LIBRARY_PATH
+   * 5. No duplicate keys
+   * 6. Strictly static error messages that never echo raw keys or sensitive values
+   */
+  private validateRuntimeEnvs(
+    runtimeEnvs?: readonly { readonly key: string; readonly value: string }[]
+  ): Record<string, string> | undefined {
+    if (runtimeEnvs === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(runtimeEnvs)) {
+      throw new Error('runtimeEnvs must be an array of key-value pairs');
+    }
+    if (runtimeEnvs.length > MAX_RUNTIME_ENVS_COUNT) {
+      throw new Error(`runtimeEnvs cannot exceed ${MAX_RUNTIME_ENVS_COUNT} variables`);
+    }
+
+    const seenKeys = new Set<string>();
+    const envRecord: Record<string, string> = {};
+    let totalBytes = 0;
+
+    for (const item of runtimeEnvs) {
+      if (!item || typeof item !== 'object') {
+        throw new Error('Each environment variable must be an object with key and value strings');
+      }
+      const { key, value } = item;
+      if (typeof key !== 'string' || !RUNTIME_ENV_KEY_REGEX.test(key)) {
+        throw new Error('Invalid environment variable key: must match ^[A-Z][A-Z0-9_]{0,127}$');
+      }
+      if (typeof value !== 'string') {
+        throw new Error('Invalid environment variable value: must be a string');
+      }
+      if (RESERVED_RUNTIME_ENV_KEYS.has(key)) {
+        throw new Error('Reserved environment variable key is not allowed');
+      }
+      if (seenKeys.has(key)) {
+        throw new Error('Duplicate environment variable key is not allowed');
+      }
+      seenKeys.add(key);
+
+      const entryBytes = Buffer.byteLength(key, 'utf8') + Buffer.byteLength(value, 'utf8');
+      totalBytes += entryBytes;
+      if (totalBytes > MAX_RUNTIME_ENVS_BYTES) {
+        throw new Error('runtimeEnvs total size exceeds 32 KiB limit');
+      }
+
+      envRecord[key] = value;
+    }
+
+    return envRecord;
   }
 
   private verifyAuthority(operation: LiaraMutationOperation, authority?: LiaraOperationAuthority): void {
@@ -611,15 +745,29 @@ export class LiaraOperationalAdapter {
       throw new Error('Explicit planId is required for app creation');
     }
     const cleanPlan = params.planId.trim();
+    let cleanBundlePlan: string | undefined;
+    if (params.bundlePlanId !== undefined) {
+      if (typeof params.bundlePlanId !== 'string' || !params.bundlePlanId.trim()) {
+        throw new Error('bundlePlanId must be a non-empty string when provided');
+      }
+      const trimmedBundle = params.bundlePlanId.trim();
+      if (trimmedBundle.length > 64 || !/^[a-z0-9_-]+$/i.test(trimmedBundle)) {
+        throw new Error('Invalid bundlePlanId: must be 1-64 alphanumeric characters, hyphens, or underscores');
+      }
+      cleanBundlePlan = trimmedBundle;
+    }
     return {
       id: crypto.randomUUID(),
       operation: 'create_app',
       appSlug: slug,
-      summary: `Create new Liara app "${slug}" (platform: ${params.platform}, plan: ${cleanPlan})`,
+      summary: cleanBundlePlan
+        ? `Create new Liara app "${slug}" (platform: ${params.platform}, plan: ${cleanPlan}, bundle: ${cleanBundlePlan})`
+        : `Create new Liara app "${slug}" (platform: ${params.platform}, plan: ${cleanPlan})`,
       params: {
         appSlug: slug,
         platform: params.platform,
         planId: cleanPlan,
+        ...(cleanBundlePlan ? { bundlePlanId: cleanBundlePlan } : {}),
       },
       riskLevel: 'medium',
       createdAt: new Date().toISOString(),
@@ -644,6 +792,9 @@ export class LiaraOperationalAdapter {
 
   proposeCreateRelease(params: CreateReleaseParams): LiaraOperationProposal<CreateReleaseParams> {
     const slug = this.validateAppSlug(params.appSlug);
+    if (params.runtimeEnvs && params.runtimeEnvs.length > 0) {
+      throw new Error('runtime environments require credential references at broker');
+    }
     return {
       id: crypto.randomUUID(),
       operation: 'create_release',
@@ -682,7 +833,7 @@ export class LiaraOperationalAdapter {
   async createApp(
     params: CreateAppParams,
     authority: LiaraOperationAuthority
-  ): Promise<LiaraExecutionOutcome<{ appSlug: string; planId: string }>> {
+  ): Promise<LiaraExecutionOutcome<{ appSlug: string; planId: string; bundlePlanId?: string }>> {
     this.verifyAuthority('create_app', authority);
     const slug = this.validateAppSlug(params.appSlug);
 
@@ -691,24 +842,45 @@ export class LiaraOperationalAdapter {
     }
     const planID = params.planId.trim();
 
+    let bundlePlanID: string | undefined;
+    if (params.bundlePlanId !== undefined) {
+      if (typeof params.bundlePlanId !== 'string' || !params.bundlePlanId.trim()) {
+        throw new Error('bundlePlanId must be a non-empty string when provided');
+      }
+      const trimmedBundle = params.bundlePlanId.trim();
+      if (trimmedBundle.length > 64 || !/^[a-z0-9_-]+$/i.test(trimmedBundle)) {
+        throw new Error('Invalid bundlePlanId: must be 1-64 alphanumeric characters, hyphens, or underscores');
+      }
+      bundlePlanID = trimmedBundle;
+    }
+
     try {
+      const payload: Record<string, unknown> = {
+        name: slug,
+        planID,
+        platform: params.platform,
+      };
+      if (bundlePlanID) {
+        payload.bundlePlanID = bundlePlanID;
+      }
+
       const { correlationId } = await this.safeOperationalFetch(
         '/v1/projects',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: slug,
-            planID,
-            platform: params.platform,
-          }),
+          body: JSON.stringify(payload),
         },
         true
       );
 
       return {
         status: 'accepted',
-        data: { appSlug: slug, planId: planID },
+        data: {
+          appSlug: slug,
+          planId: planID,
+          ...(bundlePlanID ? { bundlePlanId: bundlePlanID } : {}),
+        },
         correlationId,
       };
     } catch (err) {
@@ -796,6 +968,9 @@ export class LiaraOperationalAdapter {
     }
     const cleanSourceId = params.sourceId.trim();
 
+    // Validate runtimeEnvs before any dispatch
+    const envsRecord = this.validateRuntimeEnvs(params.runtimeEnvs);
+
     try {
       const bodyPayload: Record<string, unknown> = {
         sourceID: cleanSourceId,
@@ -805,6 +980,9 @@ export class LiaraOperationalAdapter {
       }
       if (params.platform) {
         bodyPayload.type = params.platform;
+      }
+      if (envsRecord) {
+        bodyPayload.envs = envsRecord;
       }
 
       const { data, correlationId } = await this.safeOperationalFetch(
@@ -907,6 +1085,14 @@ export class LiaraOperationalAdapter {
   // --- Observation Methods (Verified Documented Safe Reads) ---
 
   /**
+   * List all projects/apps (delegated to LiaraClient).
+   * Documented: GET /v1/projects
+   */
+  async listApps(): Promise<SafeLiaraApp[]> {
+    return this.#readClient.listProjects();
+  }
+
+  /**
    * Get app details (delegated to LiaraClient).
    * Documented: GET /v1/projects/{name}
    */
@@ -926,11 +1112,10 @@ export class LiaraOperationalAdapter {
 
   /**
    * Get release detail to verify actual release outcome.
-   * Matches by exact releaseId from documented GET /v1/projects/{name}/releases.
-   * Note on verified route: @liara/cli v9.4.7 (src/commands/deploy.ts line 527) calls
-   * GET /v1/releases/{releaseID} to check build progress; here we query project releases
-   * scoped by app slug, which is documented and safe without unverified global endpoints.
-   * Strips and redacts any secret tokens from failReason and status strings.
+   * Calls verified global route GET /v1/releases/{releaseId} with strict ID validation.
+   * Verifies project slug matches if present in provider payload.
+   * Strictly allowlists state and sanitizes failReason to safe static terminal codes,
+   * guaranteeing that raw provider error bodies/fail reasons NEVER leak secrets.
    */
   async getReleaseDetail(
     appSlug: string,
@@ -942,27 +1127,91 @@ export class LiaraOperationalAdapter {
     }
     const targetId = releaseId.trim();
 
-    // Query documented releases list for the project
-    const releases = await this.listReleases(slug);
-    const matched = releases.find((r) => r.id === targetId);
-    if (!matched) {
+    let resData: unknown;
+    try {
+      const res = await this.safeOperationalFetch(
+        `/v1/releases/${encodeURIComponent(targetId)}`,
+        { method: 'GET' },
+        false
+      );
+      resData = res.data;
+    } catch (err) {
+      if (err instanceof LiaraApiError && (err.statusCode === 404 || err.code === 'HTTP_404')) {
+        return null;
+      }
+      throw err;
+    }
+
+    const rawRelease = (typeof resData === 'object' && resData !== null && 'release' in resData)
+      ? (resData as Record<string, unknown>).release
+      : resData;
+
+    if (typeof rawRelease !== 'object' || rawRelease === null || Array.isArray(rawRelease)) {
       return null;
     }
 
-    const safeStatus = this.redact(matched.state || 'unknown').slice(0, 64);
+    const release = rawRelease as Record<string, unknown>;
+
+    // Verify project slug if present in release payload
+    const rawProject = release.project_id ?? release.projectId ?? release.project ?? release.name;
+    if (typeof rawProject === 'string' && rawProject.trim()) {
+      if (rawProject.trim().toLowerCase() !== slug) {
+        return null; // Mismatch: release belongs to a different project
+      }
+    }
+
+    const rawState = typeof release.state === 'string'
+      ? release.state
+      : typeof release.status === 'string'
+        ? release.status
+        : '';
+    const upperState = rawState.trim().toUpperCase();
+    const safeState = ALLOWED_RELEASE_STATES.has(upperState) ? upperState : 'UNKNOWN';
+
+    // Map failReason safely: NEVER reflect raw provider failReason as it could contain secrets
+    let safeFailReason: string | undefined;
+    if (typeof release.failReason === 'string' && release.failReason.trim()) {
+      safeFailReason = sanitizeReleaseFailReason(release.failReason);
+    } else if (safeState === 'FAILED') {
+      safeFailReason = 'RELEASE_FAILED';
+    } else if (safeState === 'TIMEDOUT') {
+      safeFailReason = 'DEPLOYMENT_TIMEOUT';
+    }
+
+    let port: number | undefined;
+    if (typeof release.port === 'number' && Number.isInteger(release.port) && release.port > 0 && release.port <= 65535) {
+      port = release.port;
+    }
+
+    const tag = typeof release.tag === 'string' ? release.tag.slice(0, 64) : undefined;
+    const createdAt = typeof release.created_at === 'string'
+      ? release.created_at.slice(0, 64)
+      : typeof release.createdAt === 'string'
+        ? release.createdAt.slice(0, 64)
+        : new Date().toISOString();
 
     return {
-      ...matched,
-      status: safeStatus,
-      state: safeStatus,
+      id: targetId,
+      projectId: slug,
+      state: safeState,
+      status: safeState,
+      tag,
+      createdAt,
+      port,
+      failReason: safeFailReason,
     };
   }
 
   /**
    * Bounded logs retrieval with untrusted secret redaction and line/byte budgets.
-   * Documented: GET /v1/projects/{name}/logs
-   * Official documentation specifies 'since' is required. Defaults to ISO timestamp 15 minutes ago.
-   * Bounded by maxResponseBytes to avoid fetching more than the requested budget.
+   * Uses verified CLI v2 endpoint: GET /v2/projects/{slug}/logs
+   * Search parameters:
+   *   - start: unix timestamp in seconds
+   *   - direction: 'forward'
+   *   - last_lines: 'false' | 'true'
+   *   - releaseId (optional)
+   * Response format: { data: [ { metaData: { releaseId }, values: [ [ timestamp, jsonstring ] ] } ] }
+   * Safely parses bounded _entry and type, redacting all secrets and enforcing budgets.
    */
   async getBoundedLogs(
     appSlug: string,
@@ -986,32 +1235,49 @@ export class LiaraOperationalAdapter {
       maxBytes = Math.min(Math.max(Math.floor(options.maxBodyBytes), 1024), 512 * 1024);
     }
 
-    // Official docs require 'since'. Strict validation and safe default (15 min ago).
-    let sinceParam: string;
+    let startUnix: number;
     if (options.since !== undefined) {
       if (typeof options.since === 'number') {
         if (!Number.isFinite(options.since) || options.since < 0) {
           throw new Error('since timestamp must be a positive finite number');
         }
-        sinceParam = String(Math.floor(options.since));
+        startUnix = options.since > 1e11 ? Math.floor(options.since / 1000) : Math.floor(options.since);
       } else if (typeof options.since === 'string') {
         const trimmed = options.since.trim();
-        if (!trimmed || trimmed.length > 64 || !/^[a-zA-Z0-9-:.+TZ ]+$/.test(trimmed)) {
+        if (!trimmed || trimmed.length > 64) {
           throw new Error('Invalid since parameter: must be a valid timestamp string up to 64 characters');
         }
-        sinceParam = trimmed;
+        if (/^\d+$/.test(trimmed)) {
+          const parsedNum = Number.parseInt(trimmed, 10);
+          startUnix = parsedNum > 1e11 ? Math.floor(parsedNum / 1000) : parsedNum;
+        } else {
+          const parsedTime = Date.parse(trimmed);
+          if (Number.isNaN(parsedTime)) {
+            throw new Error('Invalid since parameter: must be a valid timestamp string up to 64 characters');
+          }
+          startUnix = Math.floor(parsedTime / 1000);
+        }
       } else {
         throw new Error('since parameter must be a valid string or number');
       }
     } else {
-      // Default to ISO timestamp from 15 minutes ago
-      sinceParam = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+      // Default to 15 minutes ago in Unix seconds
+      startUnix = Math.floor((Date.now() - 15 * 60 * 1000) / 1000);
     }
 
     const query = new URLSearchParams();
-    query.set('since', sinceParam);
+    query.set('start', String(startUnix));
+    query.set('direction', 'forward');
+    query.set('last_lines', options.lastLines ? 'true' : 'false');
 
-    const endpoint = `/v1/projects/${encodeURIComponent(slug)}/logs?${query.toString()}`;
+    if (options.releaseId && typeof options.releaseId === 'string' && options.releaseId.trim()) {
+      if (!STRICT_ID_REGEX.test(options.releaseId.trim())) {
+        throw new Error('Valid strict releaseId is required');
+      }
+      query.set('releaseId', options.releaseId.trim());
+    }
+
+    const endpoint = `/v2/projects/${encodeURIComponent(slug)}/logs?${query.toString()}`;
 
     // Pass maxBytes to safeOperationalFetch to bound response payload honest size
     const { data } = await this.safeOperationalFetch(
@@ -1021,61 +1287,169 @@ export class LiaraOperationalAdapter {
       maxBytes
     );
 
-    let rawList: unknown[] = [];
-    if (Array.isArray(data)) {
-      rawList = data;
-    } else if (typeof data === 'object' && data !== null && 'logs' in data && Array.isArray((data as any).logs)) {
-      rawList = (data as any).logs;
-    }
-
     const ALLOWED_LOG_TYPES = new Set(['stdout', 'stderr', 'system']);
     const safeLines: SafeLiaraLogEntry[] = [];
     let bytesRead = 0;
     let truncated = false;
     let bytesBudgetExceeded = false;
 
-    for (const raw of rawList) {
-      if (safeLines.length >= maxLines) {
-        truncated = true;
-        break;
-      }
+    // Check if wire response matches CLI v2 format: { data: [ { metaData, values: [ [ ts, val ] ] } ] }
+    if (typeof data === 'object' && data !== null && 'data' in data && Array.isArray((data as any).data)) {
+      const entries = (data as any).data as unknown[];
+      const allTuples: Array<[rawTs: unknown, rawVal: unknown]> = [];
 
-      if (typeof raw !== 'object' || raw === null) continue;
-      const entry = raw as Record<string, unknown>;
-
-      // Strict allowlist for type to prevent secret echoing in metadata
-      const rawType = typeof entry.type === 'string' ? entry.type.toLowerCase().trim() : '';
-      const type = ALLOWED_LOG_TYPES.has(rawType) ? rawType : 'unknown';
-
-      // Strict datetime validation to prevent secret echoing in timestamp
-      let datetime = 'unknown';
-      if (typeof entry.datetime === 'string' && entry.datetime.length <= 64) {
-        const parsedTime = Date.parse(entry.datetime);
-        if (!Number.isNaN(parsedTime)) {
-          datetime = new Date(parsedTime).toISOString();
+      for (const entry of entries) {
+        if (typeof entry === 'object' && entry !== null && 'values' in entry && Array.isArray((entry as any).values)) {
+          for (const tuple of (entry as any).values) {
+            if (Array.isArray(tuple) && tuple.length >= 2) {
+              allTuples.push([tuple[0], tuple[1]]);
+            }
+          }
         }
-      } else if (typeof entry.datetime === 'number' && Number.isFinite(entry.datetime) && entry.datetime > 0) {
-        datetime = new Date(entry.datetime).toISOString();
       }
 
-      const rawMessage = typeof entry.message === 'string' ? entry.message : '';
-
-      // REDACT all untrusted secrets before returning
-      const redactedMessage = this.redact(rawMessage);
-      const entryBytes = Buffer.byteLength(redactedMessage, 'utf8');
-
-      if (bytesRead + entryBytes > maxBytes) {
-        bytesBudgetExceeded = true;
-        truncated = true;
-        break;
-      }
-
-      bytesRead += entryBytes;
-      safeLines.push({
-        type,
-        datetime,
-        message: redactedMessage,
+      // Sort all tuples by timestamp ascending
+      allTuples.sort((a, b) => {
+        try {
+          const tA = BigInt(String(a[0]).replace(/\D/g, '') || '0');
+          const tB = BigInt(String(b[0]).replace(/\D/g, '') || '0');
+          return tA < tB ? -1 : tA > tB ? 1 : 0;
+        } catch {
+          return 0;
+        }
       });
+
+      for (const [rawTs, rawVal] of allTuples) {
+        if (safeLines.length >= maxLines) {
+          truncated = true;
+          break;
+        }
+
+        // Parse datetime safely
+        let datetime = 'unknown';
+        if (typeof rawTs === 'string' && rawTs.length <= 64) {
+          if (/^\d+$/.test(rawTs)) {
+            const sec = Number.parseInt(rawTs.slice(0, 10), 10);
+            if (!Number.isNaN(sec) && sec > 0) {
+              datetime = new Date(sec * 1000).toISOString();
+            }
+          } else {
+            const parsed = Date.parse(rawTs);
+            if (!Number.isNaN(parsed)) {
+              datetime = new Date(parsed).toISOString();
+            }
+          }
+        } else if (typeof rawTs === 'number' && Number.isFinite(rawTs) && rawTs > 0) {
+          const sec = rawTs > 1e11 ? Math.floor(rawTs / 1000) : Math.floor(rawTs);
+          datetime = new Date(sec * 1000).toISOString();
+        }
+
+        // Parse log message and type
+        let rawMessage = '';
+        let rawType = 'stdout';
+
+        if (typeof rawVal === 'string') {
+          try {
+            const parsedObj = JSON.parse(rawVal);
+            if (typeof parsedObj === 'object' && parsedObj !== null) {
+              rawMessage = typeof parsedObj._entry === 'string'
+                ? parsedObj._entry
+                : typeof parsedObj.message === 'string'
+                  ? parsedObj.message
+                  : '';
+              rawType = typeof parsedObj.type === 'string' ? parsedObj.type : 'stdout';
+            } else {
+              rawMessage = rawVal;
+            }
+          } catch {
+            rawMessage = rawVal;
+          }
+        } else if (typeof rawVal === 'object' && rawVal !== null) {
+          rawMessage = typeof (rawVal as any)._entry === 'string'
+            ? (rawVal as any)._entry
+            : typeof (rawVal as any).message === 'string'
+              ? (rawVal as any).message
+              : '';
+          rawType = typeof (rawVal as any).type === 'string' ? (rawVal as any).type : 'stdout';
+        } else if (rawVal !== undefined && rawVal !== null) {
+          rawMessage = String(rawVal);
+        }
+
+        const safeType = ALLOWED_LOG_TYPES.has(rawType.toLowerCase().trim())
+          ? rawType.toLowerCase().trim()
+          : 'unknown';
+
+        const boundedRaw = rawMessage.slice(0, 32768);
+        const redactedMessage = this.redact(boundedRaw);
+        const entryBytes = Buffer.byteLength(redactedMessage, 'utf8');
+
+        if (bytesRead + entryBytes > maxBytes) {
+          bytesBudgetExceeded = true;
+          truncated = true;
+          break;
+        }
+
+        bytesRead += entryBytes;
+        safeLines.push({
+          type: safeType,
+          datetime,
+          message: redactedMessage,
+        });
+      }
+    } else {
+      // Graceful fallback for legacy/docs array or { logs: [...] } format
+      let rawList: unknown[] = [];
+      if (Array.isArray(data)) {
+        rawList = data;
+      } else if (typeof data === 'object' && data !== null && 'logs' in data && Array.isArray((data as any).logs)) {
+        rawList = (data as any).logs;
+      }
+
+      for (const raw of rawList) {
+        if (safeLines.length >= maxLines) {
+          truncated = true;
+          break;
+        }
+
+        if (typeof raw !== 'object' || raw === null) continue;
+        const entry = raw as Record<string, unknown>;
+
+        const rawType = typeof entry.type === 'string' ? entry.type.toLowerCase().trim() : '';
+        const type = ALLOWED_LOG_TYPES.has(rawType) ? rawType : 'unknown';
+
+        let datetime = 'unknown';
+        if (typeof entry.datetime === 'string' && entry.datetime.length <= 64) {
+          const parsedTime = Date.parse(entry.datetime);
+          if (!Number.isNaN(parsedTime)) {
+            datetime = new Date(parsedTime).toISOString();
+          }
+        } else if (typeof entry.datetime === 'number' && Number.isFinite(entry.datetime) && entry.datetime > 0) {
+          datetime = new Date(entry.datetime).toISOString();
+        }
+
+        const rawMessage = typeof entry._entry === 'string'
+          ? entry._entry
+          : typeof entry.message === 'string'
+            ? entry.message
+            : '';
+
+        const boundedRaw = rawMessage.slice(0, 32768);
+        const redactedMessage = this.redact(boundedRaw);
+        const entryBytes = Buffer.byteLength(redactedMessage, 'utf8');
+
+        if (bytesRead + entryBytes > maxBytes) {
+          bytesBudgetExceeded = true;
+          truncated = true;
+          break;
+        }
+
+        bytesRead += entryBytes;
+        safeLines.push({
+          type,
+          datetime,
+          message: redactedMessage,
+        });
+      }
     }
 
     return {

@@ -1,12 +1,17 @@
 import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   DeploymentProposalSchema,
   DeployProposalSchema,
   RestartProposalSchema,
+  CreateAppProposalSchema,
+  AppCostSchema,
+  ApprovedAppPlanSchema,
   LiaraPlatformSchema,
   hashDeploymentProposal,
   type DeployProposal,
   type RestartProposal,
+  type CreateAppProposal,
 } from '../src/index.js';
 
 describe('DeploymentProposal Domain Model', () => {
@@ -30,6 +35,23 @@ describe('DeploymentProposal Domain Model', () => {
     connectionId: 'conn_liara_12345',
     credentialVersion: 2,
     appId: 'payment-svc',
+  };
+
+  const validCreateAppProposal: CreateAppProposal = {
+    kind: 'create_app',
+    connectionId: 'conn_liara_12345',
+    credentialVersion: 1,
+    appId: 'my-new-app',
+    platform: 'node',
+    planId: 'standard-base-g2',
+    bundlePlanId: 'basic',
+    cost: {
+      currency: 'IRR',
+      hourly: 31944.4,
+      monthly: 22999968,
+      sourceUrl: 'https://api.liara.ir/v1/me',
+      checkedAt: '2026-10-23T00:00:00.000Z',
+    },
   };
 
   describe('DeployProposalSchema', () => {
@@ -204,6 +226,67 @@ describe('DeploymentProposal Domain Model', () => {
         })
       ).toThrow();
     });
+
+    it('validates optional runtimeEnvironment reference with strict bounds', () => {
+      const withEnv = {
+        ...validDeployProposal,
+        runtimeEnvironment: {
+          connectionId: 'conn_env_99',
+          credentialVersion: 3,
+        },
+      };
+
+      const parsed = DeployProposalSchema.parse(withEnv);
+      expect(parsed.runtimeEnvironment).toEqual({
+        connectionId: 'conn_env_99',
+        credentialVersion: 3,
+      });
+
+      // Strict bounds: credentialVersion must be positive integer
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...withEnv,
+          runtimeEnvironment: { connectionId: 'conn_env_99', credentialVersion: 0 },
+        })
+      ).toThrow();
+
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...withEnv,
+          runtimeEnvironment: { connectionId: 'conn_env_99', credentialVersion: -1 },
+        })
+      ).toThrow();
+
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...withEnv,
+          runtimeEnvironment: { connectionId: 'conn_env_99', credentialVersion: 1.5 },
+        })
+      ).toThrow();
+
+      // connectionId bounds
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...withEnv,
+          runtimeEnvironment: { connectionId: '', credentialVersion: 1 },
+        })
+      ).toThrow();
+
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...withEnv,
+          runtimeEnvironment: { connectionId: 'c'.repeat(129), credentialVersion: 1 },
+        })
+      ).toThrow();
+
+      // No extra fields in runtimeEnvironment
+      expect(() =>
+        DeployProposalSchema.parse({
+          ...withEnv,
+          runtimeEnvironment: { connectionId: 'conn_env_99', credentialVersion: 1, extra: 'bad' },
+        })
+      ).toThrow();
+    });
   });
 
   describe('RestartProposalSchema', () => {
@@ -232,13 +315,118 @@ describe('DeploymentProposal Domain Model', () => {
     });
   });
 
+  describe('CreateAppProposalSchema & AppCostSchema', () => {
+    it('validates a well-formed create_app proposal', () => {
+      const parsed = CreateAppProposalSchema.parse(validCreateAppProposal);
+      expect(parsed).toEqual(validCreateAppProposal);
+    });
+
+    it('accepts alternative valid sourceUrl https://liara.ir/pricing/', () => {
+      const parsed = CreateAppProposalSchema.parse({
+        ...validCreateAppProposal,
+        cost: {
+          ...validCreateAppProposal.cost,
+          sourceUrl: 'https://liara.ir/pricing/',
+        },
+      });
+      expect(parsed.cost.sourceUrl).toBe('https://liara.ir/pricing/');
+    });
+
+    it('rejects unverified or invalid sourceUrl', () => {
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          cost: {
+            ...validCreateAppProposal.cost,
+            // @ts-expect-error invalid source
+            sourceUrl: 'https://unverified-site.com',
+          },
+        })
+      ).toThrow();
+    });
+
+    it('rejects currency other than IRR', () => {
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          cost: {
+            ...validCreateAppProposal.cost,
+            // @ts-expect-error invalid currency
+            currency: 'USD',
+          },
+        })
+      ).toThrow();
+    });
+
+    it('rejects negative or zero costs', () => {
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          cost: { ...validCreateAppProposal.cost, hourly: -10 },
+        })
+      ).toThrow();
+
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          cost: { ...validCreateAppProposal.cost, monthly: 0 },
+        })
+      ).toThrow();
+    });
+
+    it('rejects invalid checkedAt datetime', () => {
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          cost: { ...validCreateAppProposal.cost, checkedAt: 'not-a-datetime' },
+        })
+      ).toThrow();
+    });
+
+    it('rejects unknown properties on proposal or cost (.strict())', () => {
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          extraField: 'not-allowed',
+        })
+      ).toThrow();
+
+      expect(() =>
+        CreateAppProposalSchema.parse({
+          ...validCreateAppProposal,
+          cost: {
+            ...validCreateAppProposal.cost,
+            extraCostField: 123,
+          },
+        })
+      ).toThrow();
+    });
+
+    it('validates ApprovedAppPlanSchema', () => {
+      const samplePlan = {
+        planId: 'standard-base-g2',
+        bundlePlanId: 'basic',
+        cost: validCreateAppProposal.cost,
+      };
+      expect(() => ApprovedAppPlanSchema.parse(samplePlan)).not.toThrow();
+    });
+
+    it('rejects create_app proposal missing bundlePlanId', () => {
+      const { bundlePlanId, ...missingBundle } = validCreateAppProposal;
+      expect(() => CreateAppProposalSchema.parse(missingBundle)).toThrow();
+    });
+  });
+
   describe('DeploymentProposalSchema union', () => {
-    it('discriminates deploy and restart correctly', () => {
+    it('discriminates deploy, restart, and create_app correctly', () => {
       const deployParsed = DeploymentProposalSchema.parse(validDeployProposal);
       expect(deployParsed.kind).toBe('deploy');
 
       const restartParsed = DeploymentProposalSchema.parse(validRestartProposal);
       expect(restartParsed.kind).toBe('restart');
+
+      const createParsed = DeploymentProposalSchema.parse(validCreateAppProposal);
+      expect(createParsed.kind).toBe('create_app');
     });
 
     it('rejects unknown kind', () => {
@@ -342,6 +530,110 @@ describe('DeploymentProposal Domain Model', () => {
       });
       expect(hash1).toBe(hash2);
       expect(hash1).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('works deterministically on create_app proposals and changes when any cost or plan field changes', () => {
+      const hash1 = hashDeploymentProposal(validCreateAppProposal);
+      const hash2 = hashDeploymentProposal({
+        cost: {
+          checkedAt: validCreateAppProposal.cost.checkedAt,
+          sourceUrl: validCreateAppProposal.cost.sourceUrl,
+          monthly: validCreateAppProposal.cost.monthly,
+          hourly: validCreateAppProposal.cost.hourly,
+          currency: validCreateAppProposal.cost.currency,
+        },
+        bundlePlanId: validCreateAppProposal.bundlePlanId,
+        planId: validCreateAppProposal.planId,
+        platform: validCreateAppProposal.platform,
+        appId: validCreateAppProposal.appId,
+        credentialVersion: validCreateAppProposal.credentialVersion,
+        connectionId: validCreateAppProposal.connectionId,
+        kind: 'create_app',
+      });
+      expect(hash1).toBe(hash2);
+      expect(hash1).toMatch(/^[0-9a-f]{64}$/);
+
+      // Hourly change alters hash
+      const hashHourly = hashDeploymentProposal({
+        ...validCreateAppProposal,
+        cost: { ...validCreateAppProposal.cost, hourly: 30000 },
+      });
+      expect(hashHourly).not.toBe(hash1);
+
+      // Monthly change alters hash
+      const hashMonthly = hashDeploymentProposal({
+        ...validCreateAppProposal,
+        cost: { ...validCreateAppProposal.cost, monthly: 20000000 },
+      });
+      expect(hashMonthly).not.toBe(hash1);
+
+      // Plan change alters hash
+      const hashPlan = hashDeploymentProposal({
+        ...validCreateAppProposal,
+        planId: 'medium-g2',
+      });
+      expect(hashPlan).not.toBe(hash1);
+
+      // Bundle plan change alters hash
+      const hashBundle = hashDeploymentProposal({
+        ...validCreateAppProposal,
+        bundlePlanId: 'standard',
+      });
+      expect(hashBundle).not.toBe(hash1);
+
+      // Platform change alters hash
+      const hashPlatform = hashDeploymentProposal({
+        ...validCreateAppProposal,
+        platform: 'django',
+      });
+      expect(hashPlatform).not.toBe(hash1);
+    });
+
+    it('binds runtimeEnvironment into hash and changes when reference is added or modified', () => {
+      const baseHash = hashDeploymentProposal(validDeployProposal);
+
+      const withEnvProposal = {
+        ...validDeployProposal,
+        runtimeEnvironment: {
+          connectionId: 'conn_env_1',
+          credentialVersion: 1,
+        },
+      };
+
+      const envHash = hashDeploymentProposal(withEnvProposal);
+      expect(envHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(envHash).not.toBe(baseHash);
+
+      // Deterministic regardless of key order
+      const envHashShuffled = hashDeploymentProposal({
+        runtimeEnvironment: {
+          credentialVersion: 1,
+          connectionId: 'conn_env_1',
+        },
+        kind: 'deploy',
+        bundleDigest: validDeployProposal.bundleDigest,
+        repository: validDeployProposal.repository,
+        port: validDeployProposal.port,
+        platform: validDeployProposal.platform,
+        appId: validDeployProposal.appId,
+        credentialVersion: validDeployProposal.credentialVersion,
+        connectionId: validDeployProposal.connectionId,
+      });
+      expect(envHashShuffled).toBe(envHash);
+
+      // Hash changes when connectionId changes
+      const envHashConnDiff = hashDeploymentProposal({
+        ...withEnvProposal,
+        runtimeEnvironment: { connectionId: 'conn_env_2', credentialVersion: 1 },
+      });
+      expect(envHashConnDiff).not.toBe(envHash);
+
+      // Hash changes when credentialVersion changes
+      const envHashVerDiff = hashDeploymentProposal({
+        ...withEnvProposal,
+        runtimeEnvironment: { connectionId: 'conn_env_1', credentialVersion: 2 },
+      });
+      expect(envHashVerDiff).not.toBe(envHash);
     });
 
     it('strictly rejects undefined values or accessors', () => {

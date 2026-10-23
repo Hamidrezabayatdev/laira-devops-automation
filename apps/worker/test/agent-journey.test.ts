@@ -489,7 +489,26 @@ describe('Joined Acceptance: Full Agent DevOps Lifecycle Journey', () => {
           );
         }
 
-        // Route H: Liara API List / Detail Releases (GET /v1/projects/:slug/releases)
+        // Route H: Liara API Release Detail (GET /v1/releases/:id) or List (GET /v1/projects/:slug/releases)
+        if (urlStr.includes('/v1/releases/rel_journey_ready_99') && method === 'GET') {
+          listReleasesCount++;
+          return new Response(
+            JSON.stringify({
+              release: {
+                _id: 'rel_journey_ready_99',
+                id: 'rel_journey_ready_99',
+                project_id: 'web-service',
+                state: 'READY',
+                status: 'READY',
+                type: 'node',
+                port: 3000,
+                createdAt: new Date().toISOString(),
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
         if (urlStr.includes('/v1/projects/web-service/releases') && method === 'GET') {
           listReleasesCount++;
           return new Response(
@@ -497,6 +516,7 @@ describe('Joined Acceptance: Full Agent DevOps Lifecycle Journey', () => {
               {
                 _id: 'rel_journey_ready_99',
                 id: 'rel_journey_ready_99',
+                project_id: 'web-service',
                 state: 'READY',
                 status: 'READY',
                 type: 'node',

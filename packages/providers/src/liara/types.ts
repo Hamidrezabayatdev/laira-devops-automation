@@ -28,6 +28,10 @@ export interface SafeLiaraAppDetail extends SafeLiaraApp {
   port?: number;
   nodeVersion?: string;
   isDeploying?: boolean;
+  planID?: string;
+  planId?: string;
+  bundlePlanID?: string;
+  bundlePlanId?: string;
   /**
    * Safe allowlisted env keys ONLY.
    * Values are stripped immediately to prevent credential/secret leakage.

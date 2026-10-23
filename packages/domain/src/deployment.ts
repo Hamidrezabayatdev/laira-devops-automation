@@ -38,6 +38,21 @@ export const DeploymentRepositorySchema = z
 
 export type DeploymentRepository = z.infer<typeof DeploymentRepositorySchema>;
 
+export const RuntimeEnvironmentReferenceSchema = z
+  .object({
+    connectionId: z
+      .string()
+      .min(1, 'connectionId is required')
+      .max(128, 'connectionId exceeds maximum length'),
+    credentialVersion: z
+      .number()
+      .int('credentialVersion must be an integer')
+      .positive('credentialVersion must be a positive integer'),
+  })
+  .strict();
+
+export type RuntimeEnvironmentReference = z.infer<typeof RuntimeEnvironmentReferenceSchema>;
+
 export const DeployProposalSchema = z
   .object({
     kind: z.literal('deploy'),
@@ -64,6 +79,7 @@ export const DeployProposalSchema = z
     bundleDigest: z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/, 'bundleDigest must be sha256:<64 lowercase hex characters>'),
+    runtimeEnvironment: RuntimeEnvironmentReferenceSchema.optional(),
   })
   .strict();
 
@@ -90,9 +106,74 @@ export const RestartProposalSchema = z
 
 export type RestartProposal = z.infer<typeof RestartProposalSchema>;
 
+export const AppCostSchema = z
+  .object({
+    currency: z.literal('IRR'),
+    hourly: z.number().positive('hourly cost must be positive'),
+    monthly: z.number().positive('monthly cost must be positive'),
+    sourceUrl: z.enum(['https://liara.ir/pricing/', 'https://api.liara.ir/v1/me']),
+    checkedAt: z.string().datetime({ message: 'checkedAt must be an ISO 8601 datetime string' }),
+  })
+  .strict();
+
+export type AppCost = z.infer<typeof AppCostSchema>;
+
+export const CreateAppProposalSchema = z
+  .object({
+    kind: z.literal('create_app'),
+    connectionId: z
+      .string()
+      .min(1, 'connectionId is required')
+      .max(128, 'connectionId exceeds maximum length'),
+    credentialVersion: z
+      .number()
+      .int('credentialVersion must be an integer')
+      .positive('credentialVersion must be a positive integer'),
+    appId: z
+      .string()
+      .min(3, 'appId must be at least 3 characters')
+      .max(63, 'appId cannot exceed 63 characters')
+      .regex(/^[a-z0-9-]+$/, 'appId must be lowercase alphanumeric with hyphens'),
+    platform: LiaraPlatformSchema,
+    planId: z
+      .string()
+      .min(1, 'planId is required')
+      .max(64, 'planId exceeds maximum length')
+      .regex(/^[a-z0-9_-]+$/, 'planId must be alphanumeric with hyphens or underscores'),
+    bundlePlanId: z
+      .string()
+      .min(1, 'bundlePlanId is required')
+      .max(64, 'bundlePlanId exceeds maximum length')
+      .regex(/^[a-z0-9_-]+$/, 'bundlePlanId must be alphanumeric with hyphens or underscores'),
+    cost: AppCostSchema,
+  })
+  .strict();
+
+export type CreateAppProposal = z.infer<typeof CreateAppProposalSchema>;
+
+export const ApprovedAppPlanSchema = z
+  .object({
+    planId: z
+      .string()
+      .min(1, 'planId is required')
+      .max(64, 'planId exceeds maximum length')
+      .regex(/^[a-z0-9_-]+$/, 'planId must be alphanumeric with hyphens or underscores'),
+    bundlePlanId: z
+      .string()
+      .min(1, 'bundlePlanId is required')
+      .max(64, 'bundlePlanId exceeds maximum length')
+      .regex(/^[a-z0-9_-]+$/, 'bundlePlanId must be alphanumeric with hyphens or underscores'),
+    platform: LiaraPlatformSchema.optional(),
+    cost: AppCostSchema,
+  })
+  .strict();
+
+export type ApprovedAppPlan = z.infer<typeof ApprovedAppPlanSchema>;
+
 export const DeploymentProposalSchema = z.discriminatedUnion('kind', [
   DeployProposalSchema,
   RestartProposalSchema,
+  CreateAppProposalSchema,
 ]);
 
 export type DeploymentProposal = z.infer<typeof DeploymentProposalSchema>;

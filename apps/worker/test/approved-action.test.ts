@@ -13,10 +13,28 @@ import {
   hashDeploymentProposal,
   type DeployProposal,
   type RestartProposal,
+  type CreateAppProposal,
 } from '@laira/domain';
 import { encryptCredential } from '@laira/security';
 
 const MASTER_KEY = 'a'.repeat(64); // 32-byte hex key
+
+const mockCreateAppProposal: CreateAppProposal = {
+  kind: 'create_app',
+  connectionId: 'conn_test_1',
+  credentialVersion: 1,
+  appId: 'brand-new-svc',
+  platform: 'node',
+  planId: 'standard-base-g2',
+  bundlePlanId: 'basic',
+  cost: {
+    currency: 'IRR',
+    hourly: 31944.4,
+    monthly: 22999968,
+    sourceUrl: 'https://api.liara.ir/v1/me',
+    checkedAt: new Date().toISOString(),
+  },
+};
 
 const mockDeployProposal: DeployProposal = {
   kind: 'deploy',
@@ -175,6 +193,12 @@ describe('Approved Action Execution Handler', () => {
           status: 'accepted',
           data: { restartRequested: true },
           correlationId: 'corr_3',
+        }),
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_create_1',
         }),
       }),
       httpFetch: vi.fn().mockResolvedValue({
@@ -634,6 +658,285 @@ describe('Approved Action Execution Handler', () => {
     });
   });
 
+  describe('6b. Create App Execution & Verification', () => {
+    beforeEach(() => {
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_create_1',
+        workspaceId: 'ws_1',
+        sourceRunId: 'src_run_create',
+        executionRunId: 'run_1',
+        proposal: mockCreateAppProposal,
+        proposalHash: hashDeploymentProposal(mockCreateAppProposal),
+        ownerId: 'owner_1',
+        approvedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60000),
+        dispatchedAt: null,
+        credentialVersion: 1,
+        connectionId: 'conn_test_1',
+        sourceRun: { id: 'src_run_create', type: 'agent_task', status: 'succeeded', finishedAt: new Date() },
+      });
+    });
+
+    it('fails run if proposal price quote is expired (> 24 hours)', async () => {
+      const expiredProposal: CreateAppProposal = {
+        ...mockCreateAppProposal,
+        cost: {
+          ...mockCreateAppProposal.cost,
+          checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        },
+      };
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_create_1',
+        workspaceId: 'ws_1',
+        sourceRunId: 'src_run_create',
+        executionRunId: 'run_1',
+        proposal: expiredProposal,
+        proposalHash: hashDeploymentProposal(expiredProposal),
+        ownerId: 'owner_1',
+        approvedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60000),
+        dispatchedAt: null,
+        credentialVersion: 1,
+        connectionId: 'conn_test_1',
+        sourceRun: { id: 'src_run_create', type: 'agent_task', status: 'succeeded', finishedAt: new Date() },
+      });
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_price_expired');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'PROPOSAL_PRICE_EXPIRED' })
+      );
+    });
+
+    it('pre-write read verification fails immediately if target app already exists on provider (proves no adoption)', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([
+          { projectId: 'brand-new-svc', type: 'node', status: 'running' },
+        ]),
+        createApp: vi.fn(),
+        getAppDetail: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_app_already_exists');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'APP_ALREADY_EXISTS' })
+      );
+      expect(adapterMock.createApp).not.toHaveBeenCalled(); // No mutation dispatched!
+    });
+
+    it('pre-write read verification fails if listApps rejects or returns non-array', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockRejectedValue(new Error('Network error during list')),
+        createApp: vi.fn(),
+        getAppDetail: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_prewrite_read_failed');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'PREWRITE_READ_FAILED' })
+      );
+      expect(adapterMock.createApp).not.toHaveBeenCalled();
+    });
+
+    it('handles ambiguous createApp dispatch with outcome_unknown and NO resend', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'unknown',
+          safeMessage: 'Gateway timeout during createApp',
+          correlationId: 'corr_timeout_1',
+        }),
+        getAppDetail: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('create_app_uncertain');
+      expect(adapterMock.createApp).toHaveBeenCalledTimes(1); // Dispatched exactly ONCE!
+    });
+
+    it('fails run if createApp is explicitly rejected by provider', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'rejected',
+          code: 'INSUFFICIENT_CREDIT',
+          safeMessage: 'Not enough balance to create project',
+        }),
+        getAppDetail: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_create_app');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'INSUFFICIENT_CREDIT' })
+      );
+    });
+
+    it('accepted is NOT success: times out to outcome_unknown provisioning_unconfirmed when app is not confirmed within polling window', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_1',
+        }),
+        getAppDetail: vi.fn().mockRejectedValue(new Error('App not ready yet')),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('provisioning_unconfirmed');
+      expect(mockDeps.completeRun).not.toHaveBeenCalled();
+    });
+
+    it('fails run statically if provider reports plan mismatch during verification', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_1',
+        }),
+        getAppDetail: vi.fn().mockResolvedValue({
+          projectId: 'brand-new-svc',
+          type: 'node',
+          status: 'CREATED',
+          planID: 'wrong-plan-g2',
+          bundlePlanID: 'basic',
+        }),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_plan_mismatch');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'PLAN_VERIFICATION_MISMATCH' })
+      );
+    });
+
+    it('fails run statically if provider reports bundlePlan mismatch during verification', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_1',
+        }),
+        getAppDetail: vi.fn().mockResolvedValue({
+          projectId: 'brand-new-svc',
+          type: 'node',
+          status: 'CREATED',
+          planID: 'standard-base-g2',
+          bundlePlanID: 'pro', // Mismatch! requested 'basic'
+        }),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_bundle_plan_mismatch');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'BUNDLE_PLAN_VERIFICATION_MISMATCH' })
+      );
+    });
+
+    it('requires one SAME snapshot to verify both plan and bundle; complementary partial reads yield outcome_unknown not succeeded', async () => {
+      let callCount = 0;
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_1',
+        }),
+        getAppDetail: vi.fn().mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            // Snapshot 1: plan only (missing bundlePlanID)
+            return {
+              projectId: 'brand-new-svc',
+              type: 'node',
+              status: 'CREATED',
+              planID: 'standard-base-g2',
+            };
+          }
+          // Snapshot 2: bundle only (missing planID)
+          return {
+            projectId: 'brand-new-svc',
+            type: 'node',
+            status: 'CREATED',
+            bundlePlanID: 'basic',
+          };
+        }),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('provisioning_unconfirmed');
+      expect(mockDeps.completeRun).not.toHaveBeenCalled();
+    });
+
+    it('completes run as provisioned and verified when provider confirms exact slug, platform, planID, and bundlePlanID', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_1',
+        }),
+        getAppDetail: vi.fn().mockResolvedValue({
+          projectId: 'brand-new-svc',
+          type: 'node',
+          status: 'CREATED',
+          planID: 'standard-base-g2',
+          bundlePlanID: 'basic',
+        }),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('provisioned');
+      expect(mockDeps.completeRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({
+          phase: 'provisioned',
+          verified: true,
+          verification: expect.objectContaining({
+            platformVerified: true,
+            planVerified: true,
+            bundlePlanVerified: true,
+            approvedConfigurationVerified: true,
+          }),
+        })
+      );
+    });
+  });
+
   describe('7. HTTP Probe Isolated Tests', () => {
     it('cancels body and returns healthy_2xx for 200 response', async () => {
       const cancelMock = vi.fn().mockResolvedValue(undefined);
@@ -851,6 +1154,282 @@ describe('Approved Action Execution Handler', () => {
       const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
       expect(result.phase).toBe('verified');
       expect(mockDeps.claimRun).toHaveBeenCalledWith(mockPool, 'worker_1', 'run_1', 30);
+    });
+  });
+
+  describe('11. Runtime Environment Verification & Execution', () => {
+    let deployWithEnvProposal: DeployProposal;
+
+    const mockEnvConnection = {
+      id: 'conn_env_safe',
+      workspaceId: 'ws_1',
+      name: 'Production Secrets',
+      provider: 'deployment_env',
+      status: 'active',
+      activeVersion: 1,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const mockEnvCredential = {
+      id: 'cred_env_1',
+      workspaceId: 'ws_1',
+      connectionId: 'conn_env_safe',
+      version: 1,
+      algorithm: 'aes-256-gcm',
+      ciphertext: 'ciphertext',
+      iv: 'iv',
+      tag: 'tag',
+      keyVersion: 1,
+      createdAt: new Date(),
+    };
+
+    beforeEach(() => {
+      deployWithEnvProposal = {
+        ...mockDeployProposal,
+        bundleDigest: sampleBundleDigest,
+        runtimeEnvironment: {
+          connectionId: 'conn_env_safe',
+          credentialVersion: 1,
+        },
+      };
+
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_env_1',
+        workspaceId: 'ws_1',
+        sourceRunId: 'src_run_1',
+        executionRunId: 'run_1',
+        proposal: deployWithEnvProposal,
+        proposalHash: hashDeploymentProposal(deployWithEnvProposal),
+        ownerId: 'owner_1',
+        approvedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60000),
+        dispatchedAt: null,
+        credentialVersion: 1,
+        connectionId: 'conn_test_1',
+        sourceRun: { id: 'src_run_1', type: 'agent_task', status: 'succeeded', finishedAt: new Date() },
+      });
+
+      mockDeps.getConnection = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') return mockEnvConnection;
+        return {
+          id: connId,
+          workspaceId: 'ws_1',
+          name: 'Liara',
+          provider: 'liara',
+          status: 'active',
+          activeVersion: 1,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+      });
+
+      mockDeps.getActiveCredential = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') return mockEnvCredential;
+        return {
+          id: 'cred_liara_1',
+          workspaceId: 'ws_1',
+          connectionId: connId,
+          version: 1,
+          algorithm: 'aes-256-gcm',
+          ciphertext: defaultEncrypted.ciphertext,
+          iv: defaultEncrypted.iv,
+          tag: defaultEncrypted.tag,
+          keyVersion: 1,
+          createdAt: new Date(),
+        };
+      });
+
+      mockDeps.resolveRuntimeEnvironment = vi.fn().mockResolvedValue([
+        { key: 'CANARY_SECRET_KEY', value: 'super_secret_canary_value_98765' },
+      ]);
+    });
+
+    it('pre-write fails run if runtime environment connection is not found (cross-scope protection)', async () => {
+      mockDeps.getConnection = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') return null; // Cross-scope: missing!
+        return {
+          id: connId,
+          workspaceId: 'ws_1',
+          name: 'Liara',
+          provider: 'liara',
+          status: 'active',
+          activeVersion: 1,
+        };
+      });
+
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'node', status: 'CREATED' }),
+        uploadSource: vi.fn(),
+        createRelease: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_runtime_env_missing');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'RUNTIME_ENVIRONMENT_NOT_FOUND' })
+      );
+      expect(adapterMock.uploadSource).not.toHaveBeenCalled();
+    });
+
+    it('pre-write fails run if runtime environment provider is not deployment_env', async () => {
+      mockDeps.getConnection = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') {
+          return { ...mockEnvConnection, provider: 'boxapi' }; // Wrong provider!
+        }
+        return { id: connId, workspaceId: 'ws_1', name: 'Liara', provider: 'liara', status: 'active', activeVersion: 1 };
+      });
+
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'node', status: 'CREATED' }),
+        uploadSource: vi.fn(),
+        createRelease: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_runtime_env_provider');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'RUNTIME_ENVIRONMENT_INVALID_PROVIDER' })
+      );
+      expect(adapterMock.uploadSource).not.toHaveBeenCalled();
+    });
+
+    it('pre-write fails run if runtime environment connection status is ineligible', async () => {
+      mockDeps.getConnection = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') {
+          return { ...mockEnvConnection, status: 'revoked' };
+        }
+        return { id: connId, workspaceId: 'ws_1', name: 'Liara', provider: 'liara', status: 'active', activeVersion: 1 };
+      });
+
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'node', status: 'CREATED' }),
+        uploadSource: vi.fn(),
+        createRelease: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_runtime_env_ineligible');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'RUNTIME_ENVIRONMENT_INELIGIBLE' })
+      );
+      expect(adapterMock.uploadSource).not.toHaveBeenCalled();
+    });
+
+    it('pre-write fails run if runtime environment active version drifted from proposal', async () => {
+      mockDeps.getConnection = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') {
+          return { ...mockEnvConnection, activeVersion: 2 }; // Proposal expects v1
+        }
+        return { id: connId, workspaceId: 'ws_1', name: 'Liara', provider: 'liara', status: 'active', activeVersion: 1 };
+      });
+
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'node', status: 'CREATED' }),
+        uploadSource: vi.fn(),
+        createRelease: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_runtime_env_version_mismatch');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'RUNTIME_ENVIRONMENT_VERSION_MISMATCH' })
+      );
+      expect(adapterMock.uploadSource).not.toHaveBeenCalled();
+    });
+
+    it('post-upload boundary re-check blocks release creation if runtime environment version drifts after upload', async () => {
+      let getConnectionCalls = 0;
+      mockDeps.getConnection = vi.fn().mockImplementation(async (_pool, _ws, connId) => {
+        if (connId === 'conn_env_safe') {
+          getConnectionCalls++;
+          if (getConnectionCalls > 1) {
+            // After upload: drifted to version 2!
+            return { ...mockEnvConnection, activeVersion: 2 };
+          }
+          return mockEnvConnection;
+        }
+        return { id: connId, workspaceId: 'ws_1', name: 'Liara', provider: 'liara', status: 'active', activeVersion: 1 };
+      });
+
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'node', status: 'CREATED' }),
+        uploadSource: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { sourceId: 'src_env_drift_101' },
+          correlationId: 'corr_upload_1',
+        }),
+        createRelease: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('runtime_env_drift_after_upload');
+      expect(result.output?.sourceId).toBe('src_env_drift_101');
+      expect(adapterMock.uploadSource).toHaveBeenCalledTimes(1);
+      expect(adapterMock.createRelease).not.toHaveBeenCalled(); // Mutation blocked!
+    });
+
+    it('passes exact resolved runtime environment to createRelease and never leaks canary secret in output/events', async () => {
+      const adapterMock = {
+        getAppDetail: vi.fn().mockResolvedValue({ projectId: 'my-test-app', type: 'node', status: 'CREATED' }),
+        uploadSource: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { sourceId: 'src_env_valid_202' },
+          correlationId: 'corr_upload_2',
+        }),
+        createRelease: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { releaseId: 'rel_env_valid_303' },
+          correlationId: 'corr_rel_2',
+        }),
+        getReleaseDetail: vi.fn().mockResolvedValue({
+          id: 'rel_env_valid_303',
+          state: 'READY',
+          status: 'READY',
+        }),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('verified');
+
+      // Verify createRelease received the exact runtimeEnvs
+      expect(adapterMock.createRelease).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceId: 'src_env_valid_202',
+          runtimeEnvs: [{ key: 'CANARY_SECRET_KEY', value: 'super_secret_canary_value_98765' }],
+        }),
+        expect.anything()
+      );
+
+      // Verify canary secret is NEVER in run output
+      const serializedOutput = JSON.stringify(result.output ?? {});
+      expect(serializedOutput).not.toContain('super_secret_canary_value_98765');
+      expect(serializedOutput).not.toContain('CANARY_SECRET_KEY');
+
+      // Verify canary secret is NEVER in emitted events
+      for (const call of (mockDeps.appendEvent as any).mock.calls) {
+        const serializedEvent = JSON.stringify(call[3] ?? {});
+        expect(serializedEvent).not.toContain('super_secret_canary_value_98765');
+        expect(serializedEvent).not.toContain('CANARY_SECRET_KEY');
+      }
     });
   });
 });

@@ -23,7 +23,9 @@ import {
   type DeploymentProposal,
   type DeployProposal,
   type RestartProposal,
+  type CreateAppProposal,
 } from '@laira/domain';
+import { parseLiaraDecryptedCredential } from './liara-credential.js';
 import {
   decryptCredential,
   type CredentialEnvelope,
@@ -33,8 +35,11 @@ import {
   LiaraOperationalAdapter,
   type LiaraOperationAuthority,
   type SafeLiaraReleaseDetail,
+  type CreateAppParams,
+  type LiaraExecutionOutcome,
 } from '@laira/providers/liara/operational';
-import type { SafeLiaraAppDetail } from '@laira/providers/liara';
+import { resolveRuntimeEnvironment as defaultResolveRuntimeEnvironment } from '../runtime-environment.js';
+import type { SafeLiaraApp, SafeLiaraAppDetail } from '@laira/providers/liara';
 import {
   fetchPublicGithubSource,
   type FetchPublicGithubSourceResult,
@@ -63,12 +68,13 @@ export interface ApprovedActionDependencies {
     param: GithubSourceParam,
     fetchImpl?: typeof fetch
   ) => Promise<FetchPublicGithubSourceResult>;
-  createLiaraAdapter?: (config: { apiKey: string }) => LiaraOperationalAdapter;
+  createLiaraAdapter?: (config: { apiKey: string; teamId?: string }) => LiaraOperationalAdapter;
   httpFetch?: typeof fetch;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   encryptionMasterKey?: string;
   heartbeatIntervalMs?: number;
+  resolveRuntimeEnvironment?: typeof defaultResolveRuntimeEnvironment;
 }
 
 /**
@@ -263,6 +269,8 @@ export async function executeApprovedAgentActionRun(
   const getNow = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const masterKey = deps.encryptionMasterKey ?? process.env.ENCRYPTION_MASTER_KEY;
+  const doResolveRuntimeEnvironment =
+    deps.resolveRuntimeEnvironment ?? defaultResolveRuntimeEnvironment;
 
   let eventsEmitted = 0;
   let isDispatched = false;
@@ -538,6 +546,7 @@ export async function executeApprovedAgentActionRun(
     }
 
     let liaraApiKey: string;
+    let liaraTeamId: string | undefined;
     try {
       const envelope: CredentialEnvelope = {
         algorithm: 'aes-256-gcm',
@@ -556,7 +565,10 @@ export async function executeApprovedAgentActionRun(
         keyVersion: credentialRow.keyVersion,
       };
       const decryptedBuffer = decryptCredential(envelope, masterKey, aadContext);
-      liaraApiKey = decryptedBuffer.toString('utf8');
+      const decryptedPlaintext = decryptedBuffer.toString('utf8');
+      const parsedCred = parseLiaraDecryptedCredential(decryptedPlaintext);
+      liaraApiKey = parsedCred.apiKey;
+      liaraTeamId = parsedCred.teamId;
     } catch {
       const failed = await doFailRun(pool, workerId, runId, {
         code: 'CREDENTIAL_DECRYPTION_FAILED',
@@ -565,37 +577,85 @@ export async function executeApprovedAgentActionRun(
       return { run: failed, phase: 'rejected_decryption_failure', eventsEmitted };
     }
 
-    // Instantiate operational adapter with decrypted key
-    const adapter = createAdapter({ apiKey: liaraApiKey });
+    // Instantiate operational adapter with decrypted key and bound teamId
+    const adapter = createAdapter({ apiKey: liaraApiKey, teamId: liaraTeamId });
 
-    // 9. Pre-write read verification: verify target app exists on Liara and matches exact slug
-    let appDetail: SafeLiaraAppDetail;
-    try {
-      appDetail = await adapter.getAppDetail(proposal.appId);
-    } catch {
-      const failed = await doFailRun(pool, workerId, runId, {
-        code: 'APP_NOT_FOUND',
-        message: 'Target application not found on provider',
-      });
-      return { run: failed, phase: 'rejected_app_not_found', eventsEmitted };
-    }
+    // 9. Pre-write read verification
+    if (proposal.kind === 'create_app') {
+      const createAppProp = proposal as CreateAppProposal;
 
-    if (!appDetail || (appDetail.projectId && appDetail.projectId.toLowerCase() !== proposal.appId.toLowerCase())) {
-      const failed = await doFailRun(pool, workerId, runId, {
-        code: 'APP_SLUG_MISMATCH',
-        message: 'Target application slug does not match requested proposal appId',
-      });
-      return { run: failed, phase: 'rejected_slug_mismatch', eventsEmitted };
-    }
-
-    // Pre-write check: platform compatibility for deploy
-    if (proposal.kind === 'deploy') {
-      if (appDetail.type && appDetail.type.toLowerCase() !== proposal.platform.toLowerCase()) {
+      // Price quote freshness check (max 24h old, not > 5min in future)
+      const quoteTime = new Date(createAppProp.cost.checkedAt).getTime();
+      const currentTime = getNow().getTime();
+      if (quoteTime > currentTime + 5 * 60 * 1000 || currentTime - quoteTime > 24 * 60 * 60 * 1000) {
         const failed = await doFailRun(pool, workerId, runId, {
-          code: 'PLATFORM_MISMATCH',
-          message: 'Target application platform on provider does not match proposal platform',
+          code: 'PROPOSAL_PRICE_EXPIRED',
+          message: 'Proposal price quote is expired or invalid (must be within 24 hours of current time)',
         });
-        return { run: failed, phase: 'rejected_platform_mismatch', eventsEmitted };
+        return { run: failed, phase: 'rejected_price_expired', eventsEmitted };
+      }
+
+      let existingApps: SafeLiaraApp[];
+      try {
+        existingApps = await adapter.listApps();
+      } catch {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'PREWRITE_READ_FAILED',
+          message: 'Pre-write verification failed: unable to list applications on provider',
+        });
+        return { run: failed, phase: 'rejected_prewrite_read_failed', eventsEmitted };
+      }
+
+      if (!Array.isArray(existingApps)) {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'PREWRITE_READ_FAILED',
+          message: 'Pre-write verification failed: provider returned invalid application list structure',
+        });
+        return { run: failed, phase: 'rejected_prewrite_read_failed', eventsEmitted };
+      }
+
+      const targetSlug = createAppProp.appId.toLowerCase();
+      const slugExists = existingApps.some(
+        (app) => app.projectId && app.projectId.toLowerCase() === targetSlug
+      );
+
+      if (slugExists) {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'APP_ALREADY_EXISTS',
+          message: `Target application "${createAppProp.appId}" already exists on provider; adoption is prohibited`,
+        });
+        return { run: failed, phase: 'rejected_app_already_exists', eventsEmitted };
+      }
+    } else {
+      // Pre-write read verification for deploy/restart: verify target app exists on Liara and matches exact slug
+      let appDetail: SafeLiaraAppDetail;
+      try {
+        appDetail = await adapter.getAppDetail(proposal.appId);
+      } catch {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'APP_NOT_FOUND',
+          message: 'Target application not found on provider',
+        });
+        return { run: failed, phase: 'rejected_app_not_found', eventsEmitted };
+      }
+
+      if (!appDetail || (appDetail.projectId && appDetail.projectId.toLowerCase() !== proposal.appId.toLowerCase())) {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'APP_SLUG_MISMATCH',
+          message: 'Target application slug does not match requested proposal appId',
+        });
+        return { run: failed, phase: 'rejected_slug_mismatch', eventsEmitted };
+      }
+
+      // Pre-write check: platform compatibility for deploy
+      if (proposal.kind === 'deploy') {
+        if (appDetail.type && appDetail.type.toLowerCase() !== proposal.platform.toLowerCase()) {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'PLATFORM_MISMATCH',
+            message: 'Target application platform on provider does not match proposal platform',
+          });
+          return { run: failed, phase: 'rejected_platform_mismatch', eventsEmitted };
+        }
       }
     }
 
@@ -621,6 +681,7 @@ export async function executeApprovedAgentActionRun(
             owner: deployProp.repository.owner,
             repo: deployProp.repository.repo,
             ref: deployProp.repository.commitSha,
+            timeoutMs: 300000,
           },
           httpFetch
         );
@@ -713,6 +774,63 @@ export async function executeApprovedAgentActionRun(
     // ---------------------------------------------------------------------------
     if (proposal.kind === 'deploy') {
       const deployProp = proposal as DeployProposal;
+
+      // Pre-write verification of runtime environment (if specified in proposal)
+      let resolvedRuntimeEnvs: Array<{ readonly key: string; readonly value: string }> | undefined = undefined;
+      if (deployProp.runtimeEnvironment) {
+        const envRef = deployProp.runtimeEnvironment;
+        const envConn = await doGetConnection(pool, { workspaceId }, envRef.connectionId);
+        if (!envConn) {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'RUNTIME_ENVIRONMENT_NOT_FOUND',
+            message: 'Runtime environment connection not found in workspace',
+          });
+          return { run: failed, phase: 'rejected_runtime_env_missing', eventsEmitted };
+        }
+
+        if (envConn.provider !== 'deployment_env') {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'RUNTIME_ENVIRONMENT_INVALID_PROVIDER',
+            message: 'Runtime environment connection provider must be "deployment_env"',
+          });
+          return { run: failed, phase: 'rejected_runtime_env_provider', eventsEmitted };
+        }
+
+        if (!ALLOWED_CONNECTION_STATUSES.has(envConn.status)) {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'RUNTIME_ENVIRONMENT_INELIGIBLE',
+            message: `Runtime environment connection status "${envConn.status}" is not eligible for execution`,
+          });
+          return { run: failed, phase: 'rejected_runtime_env_ineligible', eventsEmitted };
+        }
+
+        if (envConn.activeVersion !== envRef.credentialVersion) {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'RUNTIME_ENVIRONMENT_VERSION_MISMATCH',
+            message: 'Runtime environment connection active version drifted from proposal',
+          });
+          return { run: failed, phase: 'rejected_runtime_env_version_mismatch', eventsEmitted };
+        }
+
+        const envCred = await getActiveCredential(pool, { workspaceId }, envRef.connectionId);
+        if (!envCred || envCred.version !== envRef.credentialVersion) {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'RUNTIME_ENVIRONMENT_CREDENTIAL_MISMATCH',
+            message: 'Runtime environment active credential version drifted from proposal',
+          });
+          return { run: failed, phase: 'rejected_runtime_env_credential_mismatch', eventsEmitted };
+        }
+
+        try {
+          resolvedRuntimeEnvs = await doResolveRuntimeEnvironment(pool, workspaceId, masterKey!, envRef);
+        } catch {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'RUNTIME_ENVIRONMENT_RESOLUTION_FAILED',
+            message: 'Failed to resolve runtime environment secrets',
+          });
+          return { run: failed, phase: 'rejected_runtime_env_resolution', eventsEmitted };
+        }
+      }
 
       // Heartbeat check immediately before upload mutation
       await performFencedHeartbeat();
@@ -827,6 +945,42 @@ export async function executeApprovedAgentActionRun(
         return { run: updated ?? claimedRun, phase: 'credential_changed_after_upload', eventsEmitted, output: safeOutput };
       }
 
+      // 4. Recheck runtime environment status and active credential version at boundary after upload
+      if (deployProp.runtimeEnvironment) {
+        const envRef = deployProp.runtimeEnvironment;
+        let latestEnvConn: Connection | null = null;
+        let latestEnvCred: ConnectionCredentialVersion | null = null;
+        try {
+          latestEnvConn = await doGetConnection(pool, { workspaceId }, envRef.connectionId);
+          latestEnvCred = await getActiveCredential(pool, { workspaceId }, envRef.connectionId);
+        } catch {
+          const safeOutput = {
+            phase: 'runtime_env_drift_after_upload',
+            message: 'Failed to query runtime environment connection state before release creation; release aborted',
+            sourceId,
+          };
+          const updated = await setFencedRunStatus(pool, workerId, runId, 'outcome_unknown', safeOutput);
+          return { run: updated ?? claimedRun, phase: 'runtime_env_drift_after_upload', eventsEmitted, output: safeOutput };
+        }
+
+        if (
+          !latestEnvConn ||
+          latestEnvConn.provider !== 'deployment_env' ||
+          !ALLOWED_CONNECTION_STATUSES.has(latestEnvConn.status) ||
+          latestEnvConn.activeVersion !== envRef.credentialVersion ||
+          !latestEnvCred ||
+          latestEnvCred.version !== envRef.credentialVersion
+        ) {
+          const safeOutput = {
+            phase: 'runtime_env_drift_after_upload',
+            message: 'Runtime environment connection status or credential version drifted after source upload; release creation aborted',
+            sourceId,
+          };
+          const updated = await setFencedRunStatus(pool, workerId, runId, 'outcome_unknown', safeOutput);
+          return { run: updated ?? claimedRun, phase: 'runtime_env_drift_after_upload', eventsEmitted, output: safeOutput };
+        }
+      }
+
       // Step A2: Create Release
       await appendEvent(pool, workerId, runId, {
         type: 'step_progress',
@@ -844,6 +998,7 @@ export async function executeApprovedAgentActionRun(
           sourceId,
           platform: deployProp.platform,
           port: deployProp.port,
+          runtimeEnvs: resolvedRuntimeEnvs,
         },
         authority
       );
@@ -877,9 +1032,9 @@ export async function executeApprovedAgentActionRun(
       // Immediately persist provider releaseId in run.output via fenced SQL JSON patch
       await persistReleaseIdInOutput(pool, workerId, runId, releaseId);
 
-      // Step A3: Poll release status (hard bounded deadline: max 60s, 2s intervals)
-      const pollDeadlineMs = 60_000;
-      const pollIntervalMs = 2_000;
+      // Step A3: Poll release status (hard bounded deadline: max 600s, 5s intervals)
+      const pollDeadlineMs = 600_000;
+      const pollIntervalMs = 5_000;
       const startTime = getNow().getTime();
       let releaseDetail: SafeLiaraReleaseDetail | null = null;
       let pollSuccess = false;
@@ -915,16 +1070,21 @@ export async function executeApprovedAgentActionRun(
           break;
         }
 
-        if (stateUpper === 'FAILED') {
+        if (
+          stateUpper === 'FAILED' ||
+          stateUpper === 'UNHEALTHY' ||
+          stateUpper === 'CANCELED' ||
+          stateUpper === 'TIMEDOUT'
+        ) {
           const failed = await doFailRun(pool, workerId, runId, {
-            code: 'RELEASE_BUILD_FAILED',
-            message: 'Liara release build reported FAILED status',
+            code: `RELEASE_BUILD_${stateUpper}`,
+            message: `Liara release build reported ${stateUpper} status`,
           });
           await appendEvent(pool, workerId, runId, {
             type: 'run_failed',
             payload: {
-              errorCode: 'RELEASE_BUILD_FAILED',
-              errorMessage: 'Liara release build reported FAILED status',
+              errorCode: `RELEASE_BUILD_${stateUpper}`,
+              errorMessage: `Liara release build reported ${stateUpper} status`,
             },
           }).catch(() => {});
           return { run: failed, phase: 'release_build_failed', eventsEmitted };
@@ -1022,7 +1182,191 @@ export async function executeApprovedAgentActionRun(
     }
 
     // ---------------------------------------------------------------------------
-    // BRANCH B: RESTART OPERATION
+    // BRANCH B: CREATE APP OPERATION
+    // ---------------------------------------------------------------------------
+    if (proposal.kind === 'create_app') {
+      const createAppProp = proposal as CreateAppProposal;
+
+      // Heartbeat check immediately before create app mutation
+      await performFencedHeartbeat();
+
+      await appendEvent(pool, workerId, runId, {
+        type: 'step_progress',
+        payload: {
+          step: 'create_app',
+          progress: 60,
+          message: 'Dispatching create application request to Liara',
+        },
+      });
+      eventsEmitted++;
+
+      const createAppPayload: CreateAppParams = {
+        appSlug: createAppProp.appId,
+        platform: createAppProp.platform,
+        planId: createAppProp.planId,
+        bundlePlanId: createAppProp.bundlePlanId,
+      };
+
+      let createOutcome: LiaraExecutionOutcome<{ appSlug: string; planId: string; bundlePlanId?: string }>;
+      try {
+        createOutcome = await adapter.createApp(createAppPayload, authority);
+      } catch {
+        const safeOutput = {
+          phase: 'create_app_uncertain',
+          message: 'Create app dispatch call failed ambiguously; dispatch outcome unknown',
+        };
+        const updated = await setFencedRunStatus(
+          pool,
+          workerId,
+          runId,
+          'outcome_unknown',
+          safeOutput
+        );
+        return { run: updated ?? claimedRun, phase: 'create_app_uncertain', eventsEmitted, output: safeOutput };
+      }
+
+      if (!createOutcome || createOutcome.status === 'unknown') {
+        const safeOutput = {
+          phase: 'create_app_uncertain',
+          message: createOutcome?.safeMessage || 'Create app dispatch outcome is unknown',
+          correlationId: createOutcome?.correlationId,
+        };
+        const updated = await setFencedRunStatus(
+          pool,
+          workerId,
+          runId,
+          'outcome_unknown',
+          safeOutput
+        );
+        return { run: updated ?? claimedRun, phase: 'create_app_uncertain', eventsEmitted, output: safeOutput };
+      }
+
+      if (createOutcome.status === 'rejected') {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: createOutcome.code || 'CREATE_APP_REJECTED',
+          message: createOutcome.safeMessage || 'Create app rejected by provider',
+        });
+        return { run: failed, phase: 'rejected_create_app', eventsEmitted };
+      }
+
+      // accepted is NOT success: getAppDetail bounded poll to verify exact projectId slug, platform, plan, and bundlePlan
+      const MAX_POLL_ATTEMPTS = 5;
+      const POLL_INTERVAL_MS = 1000;
+      let verifiedDetail: SafeLiaraAppDetail | null = null;
+      let planVerified = false;
+      let bundlePlanVerified = false;
+
+      for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
+        await performFencedHeartbeat();
+        let attemptPlanVerified = false;
+        let attemptBundlePlanVerified = false;
+        try {
+          const detail = await adapter.getAppDetail(createAppProp.appId);
+          if (detail) {
+            const returnedSlug = (detail.projectId || '').toLowerCase();
+            const returnedPlatform = (detail.type || '').toLowerCase();
+
+            if (returnedSlug === createAppProp.appId.toLowerCase() && returnedPlatform === createAppProp.platform.toLowerCase()) {
+              // Inspect plan on DTO
+              const rawPlan = detail.planID || detail.planId || detail.plan;
+              if (rawPlan && typeof rawPlan === 'string' && rawPlan.trim()) {
+                if (rawPlan.trim().toLowerCase() !== createAppProp.planId.toLowerCase()) {
+                  const failed = await doFailRun(pool, workerId, runId, {
+                    code: 'PLAN_VERIFICATION_MISMATCH',
+                    message: 'Provider application plan does not match requested proposal plan; manual verification required',
+                  });
+                  return { run: failed, phase: 'rejected_plan_mismatch', eventsEmitted };
+                }
+                attemptPlanVerified = true;
+              }
+
+              // Inspect bundlePlanID on DTO
+              const rawBundle = detail.bundlePlanID || detail.bundlePlanId;
+              if (rawBundle && typeof rawBundle === 'string' && rawBundle.trim()) {
+                if (rawBundle.trim().toLowerCase() !== createAppProp.bundlePlanId.toLowerCase()) {
+                  const failed = await doFailRun(pool, workerId, runId, {
+                    code: 'BUNDLE_PLAN_VERIFICATION_MISMATCH',
+                    message: 'Provider application bundle plan does not match requested proposal bundle plan; manual verification required',
+                  });
+                  return { run: failed, phase: 'rejected_bundle_plan_mismatch', eventsEmitted };
+                }
+                attemptBundlePlanVerified = true;
+              }
+
+              // ONE SAME SNAPSHOT MUST SATISFY BOTH PLAN AND BUNDLE PLAN
+              if (attemptPlanVerified && attemptBundlePlanVerified) {
+                verifiedDetail = detail;
+                planVerified = true;
+                bundlePlanVerified = true;
+                break;
+              }
+            }
+          }
+        } catch {
+          // App detail not yet readable; continue bounded poll
+        }
+
+        if (attempt < MAX_POLL_ATTEMPTS) {
+          await sleep(POLL_INTERVAL_MS);
+        }
+      }
+
+      if (!verifiedDetail || !planVerified || !bundlePlanVerified) {
+        const safeOutput = {
+          phase: 'provisioning_unconfirmed',
+          message: 'Application was created on provider but plan or bundle configuration could not be fully confirmed; manual check required',
+          verification: {
+            providerAccepted: true,
+            providerState: verifiedDetail?.status ?? 'UNKNOWN',
+            platformVerified: Boolean(verifiedDetail),
+            planVerified,
+            bundlePlanVerified,
+          },
+        };
+        const updated = await setFencedRunStatus(
+          pool,
+          workerId,
+          runId,
+          'outcome_unknown',
+          safeOutput
+        );
+        return { run: updated ?? claimedRun, phase: 'provisioning_unconfirmed', eventsEmitted, output: safeOutput };
+      }
+
+      await appendEvent(pool, workerId, runId, {
+        type: 'step_progress',
+        payload: {
+          step: 'verify_app_provisioned',
+          progress: 95,
+          message: 'Application existence, platform, and plan configuration verified on provider',
+        },
+      });
+      eventsEmitted++;
+
+      const safeOutput: Record<string, unknown> = {
+        message: `Application "${createAppProp.appId}" successfully created and verified on Liara`,
+        phase: 'provisioned',
+        verified: true,
+        appId: createAppProp.appId,
+        platform: createAppProp.platform,
+        verification: {
+          providerAccepted: true,
+          providerState: verifiedDetail.status || 'CREATED',
+          platformVerified: true,
+          planVerified: true,
+          planId: createAppProp.planId,
+          bundlePlanVerified: true,
+          bundlePlanId: createAppProp.bundlePlanId,
+          approvedConfigurationVerified: true,
+        },
+      };
+
+      const completed = await doCompleteRun(pool, workerId, runId, safeOutput);
+      return { run: completed, phase: 'provisioned', eventsEmitted, output: safeOutput };
+    }
+
+    // ---------------------------------------------------------------------------
+    // BRANCH C: RESTART OPERATION
     // ---------------------------------------------------------------------------
     const restartProp = proposal as RestartProposal;
 

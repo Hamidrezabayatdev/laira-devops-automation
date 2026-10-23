@@ -3,6 +3,10 @@
 This ledger distinguishes planned scope, local verification, and live operational evidence.
 The approved plan remains the authority except for explicit user-approved changes below.
 
+## Current follow-up
+
+See [the 2026-10-23 live-journey ledger](live-journey-2026-10-23.md) for the latest operator CLI, app-provisioning, provider compatibility, real source/model probes, and the newly locked GitHub-keyring blocker. The historical delivery and check records below are not a current live-deployment claim.
+
 ## Delivery boundaries
 
 1. **Fixture-only foundation batch (independently accepted; clean-workspace checks passed):** pnpm/Node 24 workspace; typed contracts; immutable approval validation; credential encryption; tenant-scoped PostgreSQL persistence and outbox; persistent worker; safe read-only provider adapters; GitHub OAuth shell and explicitly labeled fixture UI.

@@ -18,7 +18,7 @@ export function toSafeLiaraApp(raw: unknown): SafeLiaraApp {
   const data = raw as Record<string, unknown>;
 
   const rawId = data._id ?? data.id;
-  const rawProjectId = data.project_id ?? data.name;
+  const rawProjectId = data.project_id ?? data.projectId ?? data.project ?? data.name;
 
   if (typeof rawProjectId !== 'string' || !rawProjectId.trim()) {
     throw new Error('Invalid app data: missing or non-string project_id slug');
@@ -37,7 +37,10 @@ export function toSafeLiaraApp(raw: unknown): SafeLiaraApp {
     : typeof data.platform === 'string'
       ? data.platform.slice(0, MAX_STRING_LENGTH)
       : 'unknown';
-  const rawPlan = typeof data.plan === 'string' ? data.plan.slice(0, MAX_STRING_LENGTH) : 'unknown';
+  const rawPlanCandidate = data.planID ?? data.plan;
+  const rawPlan = typeof rawPlanCandidate === 'string' && rawPlanCandidate.trim()
+    ? rawPlanCandidate.trim().slice(0, MAX_STRING_LENGTH)
+    : 'unknown';
 
   let scale = 1;
   if (typeof data.scale === 'number' && Number.isFinite(data.scale) && data.scale >= 0) {
@@ -104,11 +107,28 @@ export function toSafeLiaraAppDetail(raw: unknown): SafeLiaraAppDetail {
     nodeVersion = data.nodeVersion.slice(0, 32);
   }
 
+  let planID: string | undefined;
+  if (typeof data.planID === 'string' && data.planID.trim()) {
+    planID = data.planID.trim().slice(0, MAX_ID_LENGTH);
+  } else if (base.plan !== 'unknown') {
+    planID = base.plan;
+  }
+
+  const rawBundleCandidate = data.bundlePlanID ?? data.bundlePlanId ?? data.bundle_plan_id;
+  let bundlePlanID: string | undefined;
+  if (typeof rawBundleCandidate === 'string' && rawBundleCandidate.trim()) {
+    bundlePlanID = rawBundleCandidate.trim().slice(0, MAX_ID_LENGTH);
+  }
+
   return {
     ...base,
     port,
     nodeVersion,
     isDeploying: Boolean(data.isDeploying),
+    planID,
+    planId: planID,
+    bundlePlanID,
+    bundlePlanId: bundlePlanID,
     envKeys,
     hasEnvs,
   };
@@ -121,7 +141,7 @@ export function toSafeLiaraRelease(raw: unknown): SafeLiaraRelease {
 
   const data = raw as Record<string, unknown>;
   const rawId = data._id ?? data.id;
-  const rawProjectId = data.project_id ?? data.projectId;
+  const rawProjectId = data.project_id ?? data.projectId ?? data.project;
 
   const id = typeof rawId === 'string' ? rawId.slice(0, MAX_ID_LENGTH) : '';
   const projectId = typeof rawProjectId === 'string' ? rawProjectId.slice(0, MAX_SLUG_LENGTH) : '';

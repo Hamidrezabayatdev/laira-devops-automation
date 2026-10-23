@@ -45,6 +45,7 @@ describe('DeploymentProposal Domain Model', () => {
     platform: 'node',
     planId: 'standard-base-g2',
     bundlePlanId: 'basic',
+    networkId: '6ad9be2707e024287d1bc47a',
     cost: {
       currency: 'IRR',
       hourly: 31944.4,
@@ -406,14 +407,49 @@ describe('DeploymentProposal Domain Model', () => {
       const samplePlan = {
         planId: 'standard-base-g2',
         bundlePlanId: 'basic',
+        networkId: '6ad9be2707e024287d1bc47a',
         cost: validCreateAppProposal.cost,
       };
       expect(() => ApprovedAppPlanSchema.parse(samplePlan)).not.toThrow();
     });
 
+    it('rejects ApprovedAppPlan missing or invalid networkId', () => {
+      const samplePlan = {
+        planId: 'standard-base-g2',
+        bundlePlanId: 'basic',
+        cost: validCreateAppProposal.cost,
+      };
+      expect(() => ApprovedAppPlanSchema.parse(samplePlan)).toThrow();
+      expect(() => ApprovedAppPlanSchema.parse({ ...samplePlan, networkId: 'not-hex' })).toThrow();
+    });
+
     it('rejects create_app proposal missing bundlePlanId', () => {
       const { bundlePlanId, ...missingBundle } = validCreateAppProposal;
       expect(() => CreateAppProposalSchema.parse(missingBundle)).toThrow();
+    });
+
+    it('rejects create_app proposal missing or invalid networkId', () => {
+      const { networkId, ...missingNetwork } = validCreateAppProposal;
+      expect(() => CreateAppProposalSchema.parse(missingNetwork)).toThrow();
+      expect(() => CreateAppProposalSchema.parse({ ...validCreateAppProposal, networkId: '6AD9BE2707E024287D1BC47A' })).toThrow();
+      expect(() => CreateAppProposalSchema.parse({ ...validCreateAppProposal, networkId: 'short' })).toThrow();
+      expect(() => CreateAppProposalSchema.parse({ ...validCreateAppProposal, networkId: '6ad9be2707e024287d1bc47' })).toThrow();
+      expect(() => CreateAppProposalSchema.parse({ ...validCreateAppProposal, networkId: '6ad9be2707e024287d1bc47a99' })).toThrow();
+    });
+
+    it('rejects legacy/old proposals lacking networkId preventing replays', () => {
+      const legacyProposal = {
+        kind: 'create_app',
+        connectionId: 'conn_liara_12345',
+        credentialVersion: 1,
+        appId: 'my-new-app',
+        platform: 'node',
+        planId: 'standard-base-g2',
+        bundlePlanId: 'basic',
+        cost: validCreateAppProposal.cost,
+      };
+      expect(() => CreateAppProposalSchema.parse(legacyProposal)).toThrow();
+      expect(() => DeploymentProposalSchema.parse(legacyProposal)).toThrow();
     });
   });
 
@@ -548,10 +584,18 @@ describe('DeploymentProposal Domain Model', () => {
         appId: validCreateAppProposal.appId,
         credentialVersion: validCreateAppProposal.credentialVersion,
         connectionId: validCreateAppProposal.connectionId,
+        networkId: validCreateAppProposal.networkId,
         kind: 'create_app',
       });
       expect(hash1).toBe(hash2);
       expect(hash1).toMatch(/^[0-9a-f]{64}$/);
+
+      // Network change alters hash
+      const hashNetwork = hashDeploymentProposal({
+        ...validCreateAppProposal,
+        networkId: '111111111111111111111111',
+      });
+      expect(hashNetwork).not.toBe(hash1);
 
       // Hourly change alters hash
       const hashHourly = hashDeploymentProposal({

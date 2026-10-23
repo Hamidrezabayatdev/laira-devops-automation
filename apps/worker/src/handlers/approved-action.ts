@@ -46,6 +46,19 @@ import {
   type GithubSourceParam,
 } from '@laira/source';
 
+export interface SafeLiaraNetwork {
+  id: string;
+  name: string;
+}
+
+export type CompatibleLiaraOperationalAdapter = LiaraOperationalAdapter & {
+  listNetworks?: () => Promise<SafeLiaraNetwork[]>;
+};
+
+export type CompatibleCreateAppParams = CreateAppParams & {
+  networkId?: string;
+};
+
 export interface ApprovedExecutionResult {
   run: Run;
   phase: string;
@@ -68,7 +81,7 @@ export interface ApprovedActionDependencies {
     param: GithubSourceParam,
     fetchImpl?: typeof fetch
   ) => Promise<FetchPublicGithubSourceResult>;
-  createLiaraAdapter?: (config: { apiKey: string; teamId?: string }) => LiaraOperationalAdapter;
+  createLiaraAdapter?: (config: { apiKey: string; teamId?: string }) => CompatibleLiaraOperationalAdapter;
   httpFetch?: typeof fetch;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
@@ -264,7 +277,7 @@ export async function executeApprovedAgentActionRun(
   const doHeartbeat = deps.heartbeat ?? updateRunHeartbeat;
   const fetchGithub = deps.fetchGithubSource ?? fetchPublicGithubSource;
   const createAdapter =
-    deps.createLiaraAdapter ?? ((cfg) => new LiaraOperationalAdapter(cfg));
+    deps.createLiaraAdapter ?? ((cfg) => new LiaraOperationalAdapter(cfg) as CompatibleLiaraOperationalAdapter);
   const httpFetch = deps.httpFetch ?? globalThis.fetch;
   const getNow = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -625,6 +638,46 @@ export async function executeApprovedAgentActionRun(
           message: `Target application "${createAppProp.appId}" already exists on provider; adoption is prohibited`,
         });
         return { run: failed, phase: 'rejected_app_already_exists', eventsEmitted };
+      }
+
+      // Pre-write network verification: verify proposal network exists in current account
+      let existingNetworks: SafeLiaraNetwork[];
+      try {
+        if (typeof adapter.listNetworks !== 'function') {
+          const failed = await doFailRun(pool, workerId, runId, {
+            code: 'PREWRITE_READ_FAILED',
+            message: 'Pre-write verification failed: listNetworks is not available on provider adapter',
+          });
+          return { run: failed, phase: 'rejected_prewrite_read_failed', eventsEmitted };
+        }
+        existingNetworks = await adapter.listNetworks();
+      } catch {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'PREWRITE_READ_FAILED',
+          message: 'Pre-write verification failed: unable to list networks on provider',
+        });
+        return { run: failed, phase: 'rejected_prewrite_read_failed', eventsEmitted };
+      }
+
+      if (!Array.isArray(existingNetworks)) {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'PREWRITE_READ_FAILED',
+          message: 'Pre-write verification failed: provider returned invalid network list structure',
+        });
+        return { run: failed, phase: 'rejected_prewrite_read_failed', eventsEmitted };
+      }
+
+      const targetNetworkId = createAppProp.networkId.toLowerCase();
+      const networkExists = existingNetworks.some(
+        (net) => net && typeof net.id === 'string' && net.id.toLowerCase() === targetNetworkId
+      );
+
+      if (!networkExists) {
+        const failed = await doFailRun(pool, workerId, runId, {
+          code: 'NETWORK_NOT_FOUND',
+          message: `Target network "${createAppProp.networkId}" not found on provider; creation is prohibited`,
+        });
+        return { run: failed, phase: 'rejected_network_not_found', eventsEmitted };
       }
     } else {
       // Pre-write read verification for deploy/restart: verify target app exists on Liara and matches exact slug
@@ -1200,16 +1253,17 @@ export async function executeApprovedAgentActionRun(
       });
       eventsEmitted++;
 
-      const createAppPayload: CreateAppParams = {
+      const createAppPayload: CompatibleCreateAppParams = {
         appSlug: createAppProp.appId,
         platform: createAppProp.platform,
         planId: createAppProp.planId,
         bundlePlanId: createAppProp.bundlePlanId,
+        networkId: createAppProp.networkId,
       };
 
       let createOutcome: LiaraExecutionOutcome<{ appSlug: string; planId: string; bundlePlanId?: string }>;
       try {
-        createOutcome = await adapter.createApp(createAppPayload, authority);
+        createOutcome = await adapter.createApp(createAppPayload as CreateAppParams, authority);
       } catch {
         const safeOutput = {
           phase: 'create_app_uncertain',

@@ -145,6 +145,9 @@ export const CreateAppProposalSchema = z
       .min(1, 'bundlePlanId is required')
       .max(64, 'bundlePlanId exceeds maximum length')
       .regex(/^[a-z0-9_-]+$/, 'bundlePlanId must be alphanumeric with hyphens or underscores'),
+    networkId: z
+      .string()
+      .regex(/^[0-9a-f]{24}$/, 'networkId must be a 24-character lowercase hex string'),
     cost: AppCostSchema,
   })
   .strict();
@@ -163,6 +166,9 @@ export const ApprovedAppPlanSchema = z
       .min(1, 'bundlePlanId is required')
       .max(64, 'bundlePlanId exceeds maximum length')
       .regex(/^[a-z0-9_-]+$/, 'bundlePlanId must be alphanumeric with hyphens or underscores'),
+    networkId: z
+      .string()
+      .regex(/^[0-9a-f]{24}$/, 'networkId must be a 24-character lowercase hex string'),
     platform: LiaraPlatformSchema.optional(),
     cost: AppCostSchema,
   })

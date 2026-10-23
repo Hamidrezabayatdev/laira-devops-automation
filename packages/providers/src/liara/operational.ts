@@ -94,6 +94,12 @@ export interface CreateAppParams {
   readonly platform: string;
   readonly planId: string; // Explicit required plan; no default assumptions
   readonly bundlePlanId?: string; // Optional bundle plan ID
+  readonly networkId?: string; // Optional network ID (24-character hexadecimal)
+}
+
+export interface SafeLiaraNetwork {
+  readonly id: string;
+  readonly name: string;
 }
 
 export interface UploadSourceParams {
@@ -187,6 +193,29 @@ export const SAFE_TERMINAL_FAIL_REASONS = [
 ] as const;
 
 export type SafeTerminalFailReason = (typeof SAFE_TERMINAL_FAIL_REASONS)[number];
+
+export const ALLOWED_VALIDATION_FIELDS = [
+  'network',
+  'platform',
+  'planID',
+  'bundlePlanID',
+  'name',
+  'region',
+] as const;
+
+export type SafeValidationField = (typeof ALLOWED_VALIDATION_FIELDS)[number];
+
+export const SAFE_VALIDATION_ERROR_CODES = [
+  'APP_NAME_INVALID',
+  'PLAN_UNAVAILABLE',
+  'BUNDLE_UNAVAILABLE',
+  'NETWORK_REQUIRED',
+  'REGION_REQUIRED',
+  'ACCOUNT_VERIFICATION_REQUIRED',
+  'INSUFFICIENT_BALANCE',
+] as const;
+
+export type SafeValidationErrorCode = (typeof SAFE_VALIDATION_ERROR_CODES)[number];
 
 export function sanitizeReleaseFailReason(rawReason: unknown): SafeTerminalFailReason {
   if (typeof rawReason !== 'string' || !rawReason.trim()) {
@@ -309,6 +338,24 @@ export class LiaraOperationalAdapter {
     const trimmed = appSlug.trim().toLowerCase();
     if (trimmed.length > MAX_SLUG_LENGTH || !SLUG_REGEX.test(trimmed)) {
       throw new Error('Invalid appSlug: must be 1-64 alphanumeric characters, hyphens, or underscores');
+    }
+    return trimmed;
+  }
+
+  /**
+   * Validates optional network ID (strictly 24-character hexadecimal MongoDB ObjectId).
+   * Static error message never echoes raw inputs.
+   */
+  private validateNetworkId(networkId?: string): string | undefined {
+    if (networkId === undefined) {
+      return undefined;
+    }
+    if (typeof networkId !== 'string' || !networkId.trim()) {
+      throw new Error('networkId must be a non-empty string when provided');
+    }
+    const trimmed = networkId.trim().toLowerCase();
+    if (!/^[a-f0-9]{24}$/.test(trimmed)) {
+      throw new Error('Invalid networkId: must be a 24-character hexadecimal string');
     }
     return trimmed;
   }
@@ -557,6 +604,344 @@ export class LiaraOperationalAdapter {
   }
 
   /**
+   * Reads error response stream bounded by exact byte count (<= 16 KiB) under existing deadline.
+   * Cancels reader immediately on abort, oversize, or failure without buffering full payload.
+   */
+  private async readBoundedErrorText(
+    response: Response,
+    signal: AbortSignal,
+    maxBytes: number,
+    correlationId: string,
+    isMutation: boolean
+  ): Promise<string> {
+    if (!response.body) {
+      if (signal.aborted) {
+        throw new LiaraApiError({
+          code: isMutation ? 'TIMEOUT_AFTER_DISPATCH' : 'REQUEST_TIMEOUT',
+          statusCode: 408,
+          safeMessage: `Liara API request timed out after ${this.#timeoutMs}ms while reading error response body`,
+          correlationId,
+          retryable: false,
+        });
+      }
+      return '';
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let accumulated = '';
+    let bytesRead = 0;
+
+    const cancelBody = () => {
+      try {
+        reader.cancel().catch(() => {});
+      } catch {
+        // ignore
+      }
+    };
+
+    try {
+      while (true) {
+        if (signal.aborted) {
+          cancelBody();
+          throw new LiaraApiError({
+            code: isMutation ? 'TIMEOUT_AFTER_DISPATCH' : 'REQUEST_TIMEOUT',
+            statusCode: 408,
+            safeMessage: `Liara API request timed out after ${this.#timeoutMs}ms while reading error response body`,
+            correlationId,
+            retryable: false,
+          });
+        }
+
+        let cleanupListener: (() => void) | undefined;
+        let readResult: Awaited<ReturnType<typeof reader.read>>;
+
+        try {
+          readResult = await Promise.race([
+            reader.read(),
+            new Promise<never>((_, reject) => {
+              const onAbort = () => {
+                cancelBody();
+                reject(
+                  new LiaraApiError({
+                    code: isMutation ? 'TIMEOUT_AFTER_DISPATCH' : 'REQUEST_TIMEOUT',
+                    statusCode: 408,
+                    safeMessage: `Liara API request timed out after ${this.#timeoutMs}ms while reading error response body`,
+                    correlationId,
+                    retryable: false,
+                  })
+                );
+              };
+              if (signal.aborted) {
+                onAbort();
+                return;
+              }
+              signal.addEventListener('abort', onAbort, { once: true });
+              cleanupListener = () => signal.removeEventListener('abort', onAbort);
+            }),
+          ]);
+        } finally {
+          cleanupListener?.();
+        }
+
+        if (signal.aborted) {
+          cancelBody();
+          throw new LiaraApiError({
+            code: isMutation ? 'TIMEOUT_AFTER_DISPATCH' : 'REQUEST_TIMEOUT',
+            statusCode: 408,
+            safeMessage: `Liara API request timed out after ${this.#timeoutMs}ms while reading error response body`,
+            correlationId,
+            retryable: false,
+          });
+        }
+
+        const { done, value } = readResult;
+        if (done) break;
+
+        bytesRead += value.byteLength;
+        if (bytesRead > maxBytes) {
+          const remaining = maxBytes - (bytesRead - value.byteLength);
+          if (remaining > 0) {
+            const allowedSlice = value.subarray(0, remaining);
+            accumulated += decoder.decode(allowedSlice, { stream: false });
+          }
+          cancelBody();
+          break;
+        }
+
+        accumulated += decoder.decode(value, { stream: true });
+      }
+
+      if (signal.aborted) {
+        cancelBody();
+        throw new LiaraApiError({
+          code: isMutation ? 'TIMEOUT_AFTER_DISPATCH' : 'REQUEST_TIMEOUT',
+          statusCode: 408,
+          safeMessage: `Liara API request timed out after ${this.#timeoutMs}ms while reading error response body`,
+          correlationId,
+          retryable: false,
+        });
+      }
+
+      return accumulated;
+    } catch (err) {
+      cancelBody();
+      if (err instanceof LiaraApiError) {
+        throw err;
+      }
+      return '';
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Allowlist-classifies known validation reasons and field names ONLY.
+   * Guarantees:
+   * 1. No raw provider messages, bodies, or canary credentials are ever reflected or logged.
+   * 2. Allowed fields: 'network', 'platform', 'planID', 'bundlePlanID', 'name', 'region'.
+   * 3. Safe codes: 'APP_NAME_INVALID', 'PLAN_UNAVAILABLE', 'BUNDLE_UNAVAILABLE',
+   *    'NETWORK_REQUIRED', 'REGION_REQUIRED', 'ACCOUNT_VERIFICATION_REQUIRED', 'INSUFFICIENT_BALANCE'.
+   * 4. Static safe messages matching known fields: "Liara API error: HTTP <status> validation rejected fields: <fields>"
+   * 5. If no reliable match, returns null so HTTP_<status> remains unchanged.
+   */
+  private classifyValidationError(
+    errorText: string,
+    statusCode: number
+  ): { code: string; safeMessage: string } | null {
+    if (!errorText || !errorText.trim()) {
+      if (statusCode === 402) {
+        return {
+          code: 'INSUFFICIENT_BALANCE',
+          safeMessage: 'Liara API error: HTTP 402 (INSUFFICIENT_BALANCE)',
+        };
+      }
+      return null;
+    }
+
+    const detectedFields = new Set<SafeValidationField>();
+    let reliableCode: SafeValidationErrorCode | undefined;
+
+    if (statusCode === 402) {
+      reliableCode = 'INSUFFICIENT_BALANCE';
+    }
+
+    // Try parsing as JSON to inspect structured error fields safely
+    let parsedJson: any = null;
+    try {
+      parsedJson = JSON.parse(errorText);
+    } catch {
+      // plain text fallback
+    }
+
+    const inspectFieldKey = (rawKey: unknown) => {
+      if (typeof rawKey !== 'string') return;
+      const k = rawKey.toLowerCase().replace(/[-_]/g, '');
+      if (k === 'network' || k === 'networkid') detectedFields.add('network');
+      else if (k === 'platform' || k === 'type') detectedFields.add('platform');
+      else if (k === 'plan' || k === 'planid') detectedFields.add('planID');
+      else if (k === 'bundleplan' || k === 'bundleplanid' || k === 'featureplan') detectedFields.add('bundlePlanID');
+      else if (k === 'name' || k === 'app' || k === 'project' || k === 'appname' || k === 'projectname' || k === 'slug') detectedFields.add('name');
+      else if (k === 'region' || k === 'zone') detectedFields.add('region');
+    };
+
+    if (parsedJson && typeof parsedJson === 'object') {
+      if (parsedJson.errors && typeof parsedJson.errors === 'object') {
+        if (Array.isArray(parsedJson.errors)) {
+          for (const item of parsedJson.errors) {
+            if (typeof item === 'string') inspectFieldKey(item);
+            else if (typeof item === 'object' && item !== null && 'field' in item) inspectFieldKey(item.field);
+          }
+        } else {
+          for (const key of Object.keys(parsedJson.errors)) {
+            inspectFieldKey(key);
+          }
+        }
+      }
+
+      if (Array.isArray(parsedJson.fields)) {
+        for (const item of parsedJson.fields) {
+          inspectFieldKey(item);
+        }
+      }
+
+      if (parsedJson.details && typeof parsedJson.details === 'object' && !Array.isArray(parsedJson.details)) {
+        for (const key of Object.keys(parsedJson.details)) {
+          inspectFieldKey(key);
+        }
+      }
+
+      const rawCode = typeof parsedJson.code === 'string'
+        ? parsedJson.code
+        : typeof parsedJson.data?.code === 'string'
+          ? parsedJson.data.code
+          : undefined;
+
+      if (rawCode) {
+        const lowerCode = rawCode.toLowerCase();
+        if (lowerCode.includes('network')) {
+          reliableCode = 'NETWORK_REQUIRED';
+          detectedFields.add('network');
+        } else if (lowerCode.includes('bundle')) {
+          reliableCode = 'BUNDLE_UNAVAILABLE';
+          detectedFields.add('bundlePlanID');
+        } else if (lowerCode.includes('free_plan') || lowerCode.includes('plan')) {
+          reliableCode = 'PLAN_UNAVAILABLE';
+          detectedFields.add('planID');
+        } else if (lowerCode.includes('name') || lowerCode.includes('project') || lowerCode.includes('app')) {
+          reliableCode = 'APP_NAME_INVALID';
+          detectedFields.add('name');
+        } else if (lowerCode.includes('region')) {
+          reliableCode = 'REGION_REQUIRED';
+          detectedFields.add('region');
+        } else if (lowerCode.includes('verification') || lowerCode.includes('verify')) {
+          reliableCode = 'ACCOUNT_VERIFICATION_REQUIRED';
+        } else if (lowerCode.includes('balance') || lowerCode.includes('credit')) {
+          reliableCode = 'INSUFFICIENT_BALANCE';
+        }
+      }
+    }
+
+    const lowerText = errorText.toLowerCase();
+
+    // Field-specific detection in text
+    if (/\bnetwork\b/.test(lowerText)) {
+      detectedFields.add('network');
+    }
+    if (/\b(platform)\b/.test(lowerText)) {
+      detectedFields.add('platform');
+    }
+    if (/\b(plan|planid)\b/.test(lowerText) && !/bundle/i.test(lowerText)) {
+      detectedFields.add('planID');
+    }
+    if (/\b(bundle|bundleplan|bundleplanid|feature[- ]plan)\b/.test(lowerText)) {
+      detectedFields.add('bundlePlanID');
+    }
+    if (/\b(app[- ]name|project[- ]name|app\s+name|project\s+name)\b/.test(lowerText)) {
+      detectedFields.add('name');
+    }
+    if (/\b(region|zone)\b/.test(lowerText)) {
+      detectedFields.add('region');
+    }
+
+    // Code-specific classification in text
+    if (!reliableCode) {
+      if (
+        /network.*required|required.*network|select.*network|network.*missing|missing.*network|create network|network.*not found/i.test(
+          lowerText
+        )
+      ) {
+        reliableCode = 'NETWORK_REQUIRED';
+        detectedFields.add('network');
+      } else if (
+        /bundle.*not available|bundle.*unavailable|bundleplan.*not available|invalid.*bundle/i.test(lowerText)
+      ) {
+        reliableCode = 'BUNDLE_UNAVAILABLE';
+        detectedFields.add('bundlePlanID');
+      } else if (
+        /plan.*not available|plan.*unavailable|invalid.*plan|plan.*not found|free_plan/i.test(lowerText)
+      ) {
+        reliableCode = 'PLAN_UNAVAILABLE';
+        detectedFields.add('planID');
+      } else if (
+        /name.*invalid|invalid.*name|already exists|unique name|enter a valid name/i.test(lowerText)
+      ) {
+        reliableCode = 'APP_NAME_INVALID';
+        detectedFields.add('name');
+      } else if (
+        /region.*required|required.*region|region.*missing|invalid.*region/i.test(lowerText)
+      ) {
+        reliableCode = 'REGION_REQUIRED';
+        detectedFields.add('region');
+      } else if (
+        /verification.*required|verify.*account|identity.*verification|account.*not verified/i.test(lowerText)
+      ) {
+        reliableCode = 'ACCOUNT_VERIFICATION_REQUIRED';
+      } else if (
+        /not enough balance|insufficient.*balance|charge your account|not enough credit/i.test(lowerText)
+      ) {
+        reliableCode = 'INSUFFICIENT_BALANCE';
+      } else if (detectedFields.has('network')) {
+        reliableCode = 'NETWORK_REQUIRED';
+      }
+    }
+
+    if (reliableCode === 'BUNDLE_UNAVAILABLE') {
+      detectedFields.delete('planID');
+      detectedFields.add('bundlePlanID');
+    } else if (reliableCode === 'PLAN_UNAVAILABLE') {
+      detectedFields.delete('bundlePlanID');
+      detectedFields.add('planID');
+    } else if (reliableCode === 'NETWORK_REQUIRED') {
+      detectedFields.add('network');
+    } else if (reliableCode === 'APP_NAME_INVALID') {
+      detectedFields.add('name');
+    } else if (reliableCode === 'REGION_REQUIRED') {
+      detectedFields.add('region');
+    }
+
+    if (!reliableCode && detectedFields.size === 0) {
+      return null;
+    }
+
+    const code = reliableCode ?? `HTTP_${statusCode}`;
+    const orderedFields = ALLOWED_VALIDATION_FIELDS.filter((f) => detectedFields.has(f));
+
+    let safeMessage: string;
+    if (orderedFields.length > 0) {
+      safeMessage = `Liara API error: HTTP ${statusCode} validation rejected fields: ${orderedFields.join(', ')}`;
+    } else {
+      safeMessage = `Liara API error: HTTP ${statusCode} (${code})`;
+    }
+
+    return { code, safeMessage };
+  }
+
+  /**
    * Internal safe transport for operational requests with fixed origin and redirect security.
    * If a mutating write has been dispatched and receives 5xx, timeout, or malformed response,
    * it throws an error flagging the outcome as UNCERTAIN (never auto-resend).
@@ -638,16 +1023,42 @@ export class LiaraOperationalAdapter {
       }
 
       if (!response.ok) {
-        try {
-          response.body?.cancel().catch(() => {});
-        } catch {
-          // ignore
+        let code = `HTTP_${response.status}`;
+        let safeMessage = `Liara API error: HTTP ${response.status}`;
+
+        if (response.status === 400 || response.status === 422 || response.status === 402) {
+          try {
+            const errorText = await this.readBoundedErrorText(
+              response,
+              controller.signal,
+              16 * 1024,
+              correlationId,
+              isMutation
+            );
+            const classified = this.classifyValidationError(errorText, response.status);
+            if (classified) {
+              code = classified.code;
+              safeMessage = classified.safeMessage;
+            }
+          } catch (err) {
+            if (err instanceof LiaraApiError) {
+              throw err;
+            }
+            // ignore non-timeout read errors and preserve default HTTP_<status>
+          }
+        } else {
+          try {
+            response.body?.cancel().catch(() => {});
+          } catch {
+            // ignore
+          }
         }
+
         controller.abort();
         throw new LiaraApiError({
-          code: `HTTP_${response.status}`,
+          code,
           statusCode: response.status,
-          safeMessage: `Liara API error: HTTP ${response.status}`,
+          safeMessage,
           correlationId,
           retryable: false,
         });
@@ -756,18 +1167,30 @@ export class LiaraOperationalAdapter {
       }
       cleanBundlePlan = trimmedBundle;
     }
+    const cleanNetworkId = this.validateNetworkId(params.networkId);
+
+    const summaryParts = [
+      `platform: ${params.platform}`,
+      `plan: ${cleanPlan}`,
+    ];
+    if (cleanBundlePlan) {
+      summaryParts.push(`bundle: ${cleanBundlePlan}`);
+    }
+    if (cleanNetworkId) {
+      summaryParts.push(`network: ${cleanNetworkId}`);
+    }
+
     return {
       id: crypto.randomUUID(),
       operation: 'create_app',
       appSlug: slug,
-      summary: cleanBundlePlan
-        ? `Create new Liara app "${slug}" (platform: ${params.platform}, plan: ${cleanPlan}, bundle: ${cleanBundlePlan})`
-        : `Create new Liara app "${slug}" (platform: ${params.platform}, plan: ${cleanPlan})`,
+      summary: `Create new Liara app "${slug}" (${summaryParts.join(', ')})`,
       params: {
         appSlug: slug,
         platform: params.platform,
         planId: cleanPlan,
         ...(cleanBundlePlan ? { bundlePlanId: cleanBundlePlan } : {}),
+        ...(cleanNetworkId ? { networkId: cleanNetworkId } : {}),
       },
       riskLevel: 'medium',
       createdAt: new Date().toISOString(),
@@ -833,7 +1256,7 @@ export class LiaraOperationalAdapter {
   async createApp(
     params: CreateAppParams,
     authority: LiaraOperationAuthority
-  ): Promise<LiaraExecutionOutcome<{ appSlug: string; planId: string; bundlePlanId?: string }>> {
+  ): Promise<LiaraExecutionOutcome<{ appSlug: string; planId: string; bundlePlanId?: string; networkId?: string }>> {
     this.verifyAuthority('create_app', authority);
     const slug = this.validateAppSlug(params.appSlug);
 
@@ -854,6 +1277,8 @@ export class LiaraOperationalAdapter {
       bundlePlanID = trimmedBundle;
     }
 
+    const cleanNetworkId = this.validateNetworkId(params.networkId);
+
     try {
       const payload: Record<string, unknown> = {
         name: slug,
@@ -862,6 +1287,9 @@ export class LiaraOperationalAdapter {
       };
       if (bundlePlanID) {
         payload.bundlePlanID = bundlePlanID;
+      }
+      if (cleanNetworkId) {
+        payload.network = cleanNetworkId;
       }
 
       const { correlationId } = await this.safeOperationalFetch(
@@ -880,6 +1308,7 @@ export class LiaraOperationalAdapter {
           appSlug: slug,
           planId: planID,
           ...(bundlePlanID ? { bundlePlanId: bundlePlanID } : {}),
+          ...(cleanNetworkId ? { networkId: cleanNetworkId } : {}),
         },
         correlationId,
       };
@@ -1090,6 +1519,54 @@ export class LiaraOperationalAdapter {
    */
   async listApps(): Promise<SafeLiaraApp[]> {
     return this.#readClient.listProjects();
+  }
+
+  /**
+   * List networks for account / team.
+   * Verified CLI route: GET /v1/networks
+   * Returns safe allowlisted network descriptors { id, name }.
+   * Strictly validates 24-character hex ID and bounded name.
+   */
+  async listNetworks(): Promise<SafeLiaraNetwork[]> {
+    const { data } = await this.safeOperationalFetch(
+      '/v1/networks',
+      { method: 'GET' },
+      false
+    );
+
+    let rawList: unknown[] = [];
+    if (Array.isArray(data)) {
+      rawList = data;
+    } else if (
+      typeof data === 'object' &&
+      data !== null &&
+      'networks' in data &&
+      Array.isArray((data as Record<string, unknown>).networks)
+    ) {
+      rawList = (data as Record<string, unknown>).networks as unknown[];
+    }
+
+    const safeNetworks: SafeLiaraNetwork[] = [];
+    for (const item of rawList) {
+      if (typeof item !== 'object' || item === null) continue;
+      const rec = item as Record<string, unknown>;
+      const rawId = rec._id ?? rec.id;
+      const rawName = rec.name;
+
+      if (typeof rawId === 'string' && /^[a-f0-9]{24}$/i.test(rawId.trim())) {
+        const cleanId = rawId.trim().toLowerCase();
+        const cleanName =
+          typeof rawName === 'string' && rawName.trim()
+            ? rawName.trim().slice(0, 64)
+            : cleanId;
+        safeNetworks.push({
+          id: cleanId,
+          name: cleanName,
+        });
+      }
+    }
+
+    return safeNetworks;
   }
 
   /**

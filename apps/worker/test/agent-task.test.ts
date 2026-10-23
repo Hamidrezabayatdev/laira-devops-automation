@@ -135,6 +135,7 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
         platform: 'node',
         planId: 'standard-base-g2',
         bundlePlanId: 'basic',
+        networkId: '6ad9be2707e024287d1bc47a',
         cost: {
           currency: 'IRR',
           hourly: 31944.4,
@@ -911,6 +912,7 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
         const approvedPlan: ApprovedAppPlan = {
           planId: 'standard-base-g2',
           bundlePlanId: 'basic',
+          networkId: '6ad9be2707e024287d1bc47a',
           cost: {
             currency: 'IRR',
             hourly: 31944.4,
@@ -924,11 +926,12 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
           const createTool = opts.tools.find((t) => t.name === 'propose_app_creation');
           expect(createTool).toBeDefined();
 
-          // 1. Tool schema strictly accepts ONLY appId, platform, planId (cost is NEVER model-controlled)
+          // 1. Tool schema strictly accepts ONLY appId, platform, planId (cost and networkId are NEVER model-controlled)
           expect(createTool!.schema.properties).toHaveProperty('appId');
           expect(createTool!.schema.properties).toHaveProperty('platform');
           expect(createTool!.schema.properties).toHaveProperty('planId');
           expect((createTool!.schema.properties as any).cost).toBeUndefined();
+          expect((createTool!.schema.properties as any).networkId).toBeUndefined();
 
           // 2. Unapproved plan rejection
           const unapprovedRes = await createTool!.execute({
@@ -946,7 +949,7 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
           });
           expect(invalidPlatformRes).toMatchObject({ error: 'INVALID_PLATFORM' });
 
-          // 4. Valid invocation creates exact proposal with server-controlled cost and bundlePlanId
+          // 4. Valid invocation creates exact proposal with server-controlled cost, bundlePlanId, and networkId
           const successRes = await createTool!.execute({
             appId: 'test-app',
             platform: 'node',
@@ -960,6 +963,7 @@ describe('Agent Task Handler & Tools Unit & Integration Tests', () => {
             platform: 'node',
             planId: 'standard-base-g2',
             bundlePlanId: 'basic',
+            networkId: '6ad9be2707e024287d1bc47a',
             cost: approvedPlan.cost,
           });
 

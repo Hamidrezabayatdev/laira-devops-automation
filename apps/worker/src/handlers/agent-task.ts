@@ -1113,6 +1113,7 @@ export async function executeAgentTaskRun(
             platform: platformParse.data,
             planId: matchedPlan.planId,
             bundlePlanId: matchedPlan.bundlePlanId,
+            networkId: matchedPlan.networkId,
             cost: matchedPlan.cost,
           };
 
@@ -1139,6 +1140,7 @@ export async function executeAgentTaskRun(
               platform: validatedProposal.platform,
               planId: validatedProposal.planId,
               bundlePlanId: validatedProposal.bundlePlanId,
+              networkId: validatedProposal.networkId,
               cost: validatedProposal.cost,
             },
           };

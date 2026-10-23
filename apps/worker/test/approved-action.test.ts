@@ -27,6 +27,7 @@ const mockCreateAppProposal: CreateAppProposal = {
   platform: 'node',
   planId: 'standard-base-g2',
   bundlePlanId: 'basic',
+  networkId: '6ad9be2707e024287d1bc47a',
   cost: {
     currency: 'IRR',
     hourly: 31944.4,
@@ -195,6 +196,9 @@ describe('Approved Action Execution Handler', () => {
           correlationId: 'corr_3',
         }),
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'accepted',
           data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
@@ -716,6 +720,9 @@ describe('Approved Action Execution Handler', () => {
         listApps: vi.fn().mockResolvedValue([
           { projectId: 'brand-new-svc', type: 'node', status: 'running' },
         ]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn(),
         getAppDetail: vi.fn(),
       };
@@ -735,6 +742,9 @@ describe('Approved Action Execution Handler', () => {
     it('pre-write read verification fails if listApps rejects or returns non-array', async () => {
       const adapterMock = {
         listApps: vi.fn().mockRejectedValue(new Error('Network error during list')),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn(),
         getAppDetail: vi.fn(),
       };
@@ -754,6 +764,9 @@ describe('Approved Action Execution Handler', () => {
     it('handles ambiguous createApp dispatch with outcome_unknown and NO resend', async () => {
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'unknown',
           safeMessage: 'Gateway timeout during createApp',
@@ -771,6 +784,9 @@ describe('Approved Action Execution Handler', () => {
     it('fails run if createApp is explicitly rejected by provider', async () => {
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'rejected',
           code: 'INSUFFICIENT_CREDIT',
@@ -793,6 +809,9 @@ describe('Approved Action Execution Handler', () => {
     it('accepted is NOT success: times out to outcome_unknown provisioning_unconfirmed when app is not confirmed within polling window', async () => {
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'accepted',
           data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
@@ -810,6 +829,9 @@ describe('Approved Action Execution Handler', () => {
     it('fails run statically if provider reports plan mismatch during verification', async () => {
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'accepted',
           data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
@@ -838,6 +860,9 @@ describe('Approved Action Execution Handler', () => {
     it('fails run statically if provider reports bundlePlan mismatch during verification', async () => {
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'accepted',
           data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
@@ -863,10 +888,142 @@ describe('Approved Action Execution Handler', () => {
       );
     });
 
+    it('pre-write network verification fails before dispatch claim if target network does not exist on provider', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '111111111111111111111111', name: 'other-network' },
+        ]),
+        createApp: vi.fn(),
+        getAppDetail: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_network_not_found');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'NETWORK_NOT_FOUND' })
+      );
+      expect(mockDeps.claimDispatch).not.toHaveBeenCalled(); // Stops before dispatch claim!
+      expect(adapterMock.createApp).not.toHaveBeenCalled(); // No mutation dispatched!
+    });
+
+    it('pre-write network verification fails before dispatch claim if listNetworks rejects or returns non-array', async () => {
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockRejectedValue(new Error('Network listing failed')),
+        createApp: vi.fn(),
+        getAppDetail: vi.fn(),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_prewrite_read_failed');
+      expect(mockDeps.failRun).toHaveBeenCalledWith(
+        mockPool,
+        'worker_1',
+        'run_1',
+        expect.objectContaining({ code: 'PREWRITE_READ_FAILED' })
+      );
+      expect(mockDeps.claimDispatch).not.toHaveBeenCalled();
+      expect(adapterMock.createApp).not.toHaveBeenCalled();
+    });
+
+    it('enforces exact hash binding covering networkId: altered networkId is rejected before dispatch', async () => {
+      const alteredProposal = {
+        ...mockCreateAppProposal,
+        networkId: '222222222222222222222222',
+      };
+      // Original approval hash was computed with mockCreateAppProposal (networkId: 6ad9be2707e024287d1bc47a)
+      mockDeps.getApprovedAction = vi.fn().mockResolvedValue({
+        approvalId: 'appr_create_1',
+        workspaceId: 'ws_1',
+        sourceRunId: 'src_run_create',
+        executionRunId: 'run_1',
+        proposal: alteredProposal,
+        proposalHash: hashDeploymentProposal(mockCreateAppProposal), // Mismatch!
+        ownerId: 'owner_1',
+        approvedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60000),
+        dispatchedAt: null,
+        credentialVersion: 1,
+        connectionId: 'conn_test_1',
+        sourceRun: { id: 'src_run_create', type: 'agent_task', status: 'succeeded', finishedAt: new Date() },
+      });
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('rejected_hash_mismatch');
+      expect(mockDeps.claimDispatch).not.toHaveBeenCalled();
+    });
+
+    it('passes networkId to adapter.createApp and preserves team context on adapter creation', async () => {
+      const teamEncrypted = encryptCredential(JSON.stringify({ apiKey: 'valid-liara-api-key', teamId: 'team_xyz' }), MASTER_KEY, {
+        workspaceId: 'ws_1',
+        connectionId: 'conn_test_1',
+        version: '1',
+        keyVersion: 1,
+      });
+      mockDeps.getActiveCredential = vi.fn().mockResolvedValue({
+        id: 'cred_1',
+        workspaceId: 'ws_1',
+        connectionId: 'conn_test_1',
+        version: 1,
+        algorithm: 'aes-256-gcm',
+        ciphertext: teamEncrypted.ciphertext,
+        iv: teamEncrypted.iv,
+        tag: teamEncrypted.tag,
+        keyVersion: 1,
+        createdAt: new Date(),
+      });
+
+      const adapterMock = {
+        listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
+        createApp: vi.fn().mockResolvedValue({
+          status: 'accepted',
+          data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
+          correlationId: 'corr_1',
+        }),
+        getAppDetail: vi.fn().mockResolvedValue({
+          projectId: 'brand-new-svc',
+          type: 'node',
+          status: 'CREATED',
+          planID: 'standard-base-g2',
+          bundlePlanID: 'basic',
+        }),
+      };
+      mockDeps.createLiaraAdapter = vi.fn().mockReturnValue(adapterMock);
+
+      const result = await executeApprovedAgentActionRun(mockPool, 'worker_1', 'run_1', 30, mockDeps);
+      expect(result.phase).toBe('provisioned');
+      expect(mockDeps.createLiaraAdapter).toHaveBeenCalledWith({
+        apiKey: 'valid-liara-api-key',
+        teamId: 'team_xyz',
+      });
+      expect(adapterMock.createApp).toHaveBeenCalledWith(
+        expect.objectContaining({
+          appSlug: 'brand-new-svc',
+          platform: 'node',
+          planId: 'standard-base-g2',
+          bundlePlanId: 'basic',
+          networkId: '6ad9be2707e024287d1bc47a',
+        }),
+        expect.anything()
+      );
+    });
+
     it('requires one SAME snapshot to verify both plan and bundle; complementary partial reads yield outcome_unknown not succeeded', async () => {
       let callCount = 0;
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'accepted',
           data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },
@@ -902,6 +1059,9 @@ describe('Approved Action Execution Handler', () => {
     it('completes run as provisioned and verified when provider confirms exact slug, platform, planID, and bundlePlanID', async () => {
       const adapterMock = {
         listApps: vi.fn().mockResolvedValue([]),
+        listNetworks: vi.fn().mockResolvedValue([
+          { id: '6ad9be2707e024287d1bc47a', name: 'default' },
+        ]),
         createApp: vi.fn().mockResolvedValue({
           status: 'accepted',
           data: { appSlug: 'brand-new-svc', planId: 'standard-base-g2' },

@@ -1233,4 +1233,425 @@ describe('Liara Operational & Observation Adapter', () => {
       assert.match(outcome.safeMessage, /exceeded 2048 bytes limit after mutation dispatch/);
     }
   });
+
+  it('lists networks via GET /v1/networks with safe allowlisted fields and teamId forwarding', async () => {
+    let capturedUrl = '';
+    const mockNetworksResponse = {
+      networks: [
+        {
+          _id: '6ad9be2707e024287d1bc47a',
+          name: 'devops-network',
+          secret_key: CANARY_SECRETS.apiToken,
+          routing_rules: [{ internal_ip: '10.0.0.1' }],
+        },
+        {
+          _id: '507f1f77bcf86cd799439011',
+          name: 'staging-network',
+        },
+      ],
+    };
+
+    const mockFetch: typeof fetch = async (input) => {
+      capturedUrl = input.toString();
+      return new Response(JSON.stringify(mockNetworksResponse), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      teamId: 'team-ops-42',
+      fetchFn: mockFetch,
+    });
+
+    const networks = await adapter.listNetworks();
+    assert.strictEqual(capturedUrl, 'https://api.liara.ir/v1/networks?teamID=team-ops-42');
+    assert.strictEqual(networks.length, 2);
+    assert.deepStrictEqual(networks[0], {
+      id: '6ad9be2707e024287d1bc47a',
+      name: 'devops-network',
+    });
+    assert.deepStrictEqual(networks[1], {
+      id: '507f1f77bcf86cd799439011',
+      name: 'staging-network',
+    });
+
+    const serialized = JSON.stringify(networks);
+    assert(!serialized.includes(CANARY_SECRETS.apiToken));
+    assert(!serialized.includes('secret_key'));
+    assert(!serialized.includes('routing_rules'));
+  });
+
+  it('handles array wire format and sanitizes invalid IDs in listNetworks', async () => {
+    const mockArray = [
+      {
+        _id: '6ad9be2707e024287d1bc47a',
+        name: 'valid-net',
+      },
+      {
+        _id: 'invalid-id-not-24-hex',
+        name: 'bad-net',
+      },
+    ];
+
+    const mockFetch: typeof fetch = async () => {
+      return new Response(JSON.stringify(mockArray), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    const networks = await adapter.listNetworks();
+    assert.strictEqual(networks.length, 1);
+    assert.strictEqual(networks[0].id, '6ad9be2707e024287d1bc47a');
+    assert.strictEqual(networks[0].name, 'valid-net');
+  });
+
+  it('handles optional networkId in proposeCreateApp and createApp: validates 24-hex, forwards network in POST', async () => {
+    let capturedBody: any;
+    let capturedUrl = '';
+
+    const mockFetch: typeof fetch = async (input, init) => {
+      capturedUrl = input.toString();
+      capturedBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({ status: 'created' }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    // 1. proposeCreateApp retains networkId and includes it in summary
+    const proposal = adapter.proposeCreateApp({
+      appSlug: 'network-app',
+      platform: 'next',
+      planId: 'standard-base-g2',
+      bundlePlanId: 'basic',
+      networkId: '6ad9be2707e024287d1bc47a',
+    });
+
+    assert.strictEqual(proposal.params.networkId, '6ad9be2707e024287d1bc47a');
+    assert(proposal.summary.includes('network: 6ad9be2707e024287d1bc47a'));
+
+    // 2. createApp sends network in POST body (matching CLI network._id)
+    const outcome = await adapter.createApp(
+      {
+        appSlug: 'network-app',
+        platform: 'next',
+        planId: 'standard-base-g2',
+        bundlePlanId: 'basic',
+        networkId: '6ad9be2707e024287d1bc47a',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(outcome.status, 'accepted');
+    if (outcome.status === 'accepted') {
+      assert.strictEqual(outcome.data.appSlug, 'network-app');
+      assert.strictEqual(outcome.data.networkId, '6ad9be2707e024287d1bc47a');
+    }
+    assert.strictEqual(capturedBody.network, '6ad9be2707e024287d1bc47a');
+    assert.strictEqual(capturedBody.name, 'network-app');
+    assert.strictEqual(capturedBody.planID, 'standard-base-g2');
+    assert.strictEqual(capturedBody.platform, 'next');
+    assert.strictEqual(capturedBody.bundlePlanID, 'basic');
+
+    // 3. When networkId is omitted: no network property sent (no default autoselect)
+    await adapter.createApp(
+      {
+        appSlug: 'no-network-app',
+        platform: 'next',
+        planId: 'standard-base-g2',
+      },
+      validAuthority
+    );
+    assert.strictEqual('network' in capturedBody, false);
+  });
+
+  it('rejects invalid networkId before dispatch without leaking canary secrets', async () => {
+    let fetchCount = 0;
+    const mockFetch: typeof fetch = async () => {
+      fetchCount++;
+      return new Response('{}', { status: 200 });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    const maliciousId = 'not-24-hex-' + CANARY_SECRETS.apiToken;
+
+    assert.throws(
+      () => {
+        adapter.proposeCreateApp({
+          appSlug: 'test-app',
+          platform: 'nodejs',
+          planId: 'standard-base-g2',
+          networkId: maliciousId,
+        });
+      },
+      (err: Error) => {
+        assert.strictEqual(
+          err.message,
+          'Invalid networkId: must be a 24-character hexadecimal string'
+        );
+        assert(!err.message.includes(CANARY_SECRETS.apiToken));
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      async () => {
+        await adapter.createApp(
+          {
+            appSlug: 'test-app',
+            platform: 'nodejs',
+            planId: 'standard-base-g2',
+            networkId: 'tooshort123',
+          },
+          validAuthority
+        );
+      },
+      /Invalid networkId: must be a 24-character hexadecimal string/
+    );
+
+    assert.strictEqual(fetchCount, 0, 'No HTTP request must be dispatched for invalid networkId');
+  });
+
+  it('diagnoses HTTP 400 network required error safely without leaking raw message or canary credentials', async () => {
+    const rawErrorBody = JSON.stringify({
+      statusCode: 400,
+      message: `network is required for project with secret ${CANARY_SECRETS.apiToken}`,
+      errors: {
+        network: [`network is required for token ${CANARY_SECRETS.jwtSecret}`],
+      },
+    });
+
+    const mockFetch: typeof fetch = async () => {
+      return new Response(rawErrorBody, {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    const outcome = await adapter.createApp(
+      {
+        appSlug: 'laira-copilot-e2e-1023',
+        platform: 'next',
+        planId: 'standard-base-g2',
+        bundlePlanId: 'basic',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(outcome.status, 'rejected');
+    if (outcome.status === 'rejected') {
+      assert.strictEqual(outcome.code, 'NETWORK_REQUIRED');
+      assert.strictEqual(
+        outcome.safeMessage,
+        'Liara API error: HTTP 400 validation rejected fields: network'
+      );
+
+      // Verify zero canary secrets or raw messages in the outcome
+      const serialized = JSON.stringify(outcome);
+      assert(!serialized.includes(CANARY_SECRETS.apiToken));
+      assert(!serialized.includes(CANARY_SECRETS.jwtSecret));
+      assert(!serialized.includes('with secret'));
+    }
+  });
+
+  it('allowlist-classifies known validation reasons: plan, bundle, name, region, account verification, balance', async () => {
+    const testCases: Array<{
+      status: number;
+      body: Record<string, unknown>;
+      expectedCode: string;
+      expectedMessage: string;
+    }> = [
+      {
+        status: 400,
+        body: { message: 'bundlePlan is not available for free plan.' },
+        expectedCode: 'BUNDLE_UNAVAILABLE',
+        expectedMessage: 'Liara API error: HTTP 400 validation rejected fields: bundlePlanID',
+      },
+      {
+        status: 400,
+        body: { message: 'The selected plan is not available.' },
+        expectedCode: 'PLAN_UNAVAILABLE',
+        expectedMessage: 'Liara API error: HTTP 400 validation rejected fields: planID',
+      },
+      {
+        status: 400,
+        body: { message: 'Please enter a valid name for your app.' },
+        expectedCode: 'APP_NAME_INVALID',
+        expectedMessage: 'Liara API error: HTTP 400 validation rejected fields: name',
+      },
+      {
+        status: 400,
+        body: { message: 'region is required' },
+        expectedCode: 'REGION_REQUIRED',
+        expectedMessage: 'Liara API error: HTTP 400 validation rejected fields: region',
+      },
+      {
+        status: 400,
+        body: { message: 'Account identity verification required' },
+        expectedCode: 'ACCOUNT_VERIFICATION_REQUIRED',
+        expectedMessage: 'Liara API error: HTTP 400 (ACCOUNT_VERIFICATION_REQUIRED)',
+      },
+      {
+        status: 402,
+        body: { message: 'Not enough balance. Please charge your account.' },
+        expectedCode: 'INSUFFICIENT_BALANCE',
+        expectedMessage: 'Liara API error: HTTP 402 (INSUFFICIENT_BALANCE)',
+      },
+      {
+        status: 400,
+        body: { message: 'Unknown unspecified error message' },
+        expectedCode: 'HTTP_400',
+        expectedMessage: 'Liara API error: HTTP 400',
+      },
+    ];
+
+    for (const tc of testCases) {
+      const mockFetch: typeof fetch = async () => {
+        return new Response(JSON.stringify(tc.body), {
+          status: tc.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      };
+
+      const adapter = new LiaraOperationalAdapter({
+        apiKey: 'test-token',
+        fetchFn: mockFetch,
+      });
+
+      const outcome = await adapter.createApp(
+        {
+          appSlug: 'test-app',
+          platform: 'nodejs',
+          planId: 'standard-base-g2',
+        },
+        validAuthority
+      );
+
+      assert.strictEqual(outcome.status, 'rejected');
+      if (outcome.status === 'rejected') {
+        assert.strictEqual(outcome.code, tc.expectedCode);
+        assert.strictEqual(outcome.safeMessage, tc.expectedMessage);
+      }
+    }
+  });
+
+  it('bounds error body reading to <= 16 KiB and cancels stream immediately without memory leak', async () => {
+    let pulledChunks = 0;
+    let cancelCalled = false;
+    const totalChunks = 20; // 20 KiB total
+    const chunkSize = 1024;
+
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (pulledChunks < totalChunks) {
+            pulledChunks++;
+            const chunk = new TextEncoder().encode(
+              pulledChunks === 1
+                ? '{"message":"network is required",'
+                : '"pad":"' + 'x'.repeat(1000) + '",'
+            );
+            controller.enqueue(chunk);
+          } else {
+            controller.enqueue(new TextEncoder().encode('"end":true}'));
+            controller.close();
+          }
+        },
+        cancel() {
+          cancelCalled = true;
+        },
+      },
+      new CountQueuingStrategy({ highWaterMark: 0 })
+    );
+
+    const mockFetch: typeof fetch = async () => {
+      return new Response(stream, {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      fetchFn: mockFetch,
+    });
+
+    const outcome = await adapter.createApp(
+      {
+        appSlug: 'bound-test',
+        platform: 'nodejs',
+        planId: 'standard-base-g2',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(outcome.status, 'rejected');
+    if (outcome.status === 'rejected') {
+      assert.strictEqual(outcome.code, 'NETWORK_REQUIRED');
+      assert.strictEqual(
+        outcome.safeMessage,
+        'Liara API error: HTTP 400 validation rejected fields: network'
+      );
+    }
+
+    assert.strictEqual(cancelCalled, true, 'reader.cancel() must be called once 16 KiB ceiling is reached');
+    assert(pulledChunks <= 18 && pulledChunks < totalChunks, `Stream read must bound at 16 KiB ceiling; pulled ${pulledChunks} chunks`);
+  });
+
+  it('aborts stalled error body read cleanly under existing deadline', async () => {
+    const hangingStream = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise(() => {}); // never resolves
+      },
+    });
+
+    const mockFetch: typeof fetch = async () => {
+      return new Response(hangingStream, {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const adapter = new LiaraOperationalAdapter({
+      apiKey: 'test-token',
+      timeoutMs: 40,
+      fetchFn: mockFetch,
+    });
+
+    const outcome = await adapter.createApp(
+      {
+        appSlug: 'stall-test',
+        platform: 'nodejs',
+        planId: 'standard-base-g2',
+      },
+      validAuthority
+    );
+
+    assert.strictEqual(outcome.status, 'unknown');
+    if (outcome.status === 'unknown') {
+      assert.strictEqual(outcome.code, 'TIMEOUT_AFTER_DISPATCH');
+    }
+  });
 });

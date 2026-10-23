@@ -653,6 +653,14 @@ export function AssistantSidebar({
                             {msg.proposedAction.planId} / {msg.proposedAction.bundlePlanId}
                           </span>
                         </div>
+                        {msg.proposedAction.networkId && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-zinc-400">شبکه:</span>
+                            <span className="font-mono text-zinc-200 text-[10px]" dir="ltr">
+                              {msg.proposedAction.networkId}
+                            </span>
+                          </div>
+                        )}
                         <div className="flex items-center justify-between">
                           <span className="text-zinc-400">هزینه ساعتی:</span>
                           <span className="font-mono text-zinc-200" dir="ltr">

@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import { signIn } from 'next-auth/react';
 import { AppShell } from '@/components/layout/app-shell';
 import { RunList } from '@/components/runs/run-list';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -233,12 +234,15 @@ export default function HomePage() {
                   </div>
                   <div className="mt-2">
                     {isConfigured ? (
-                      <a href="/api/auth/signin">
-                        <Button variant="outline" size="sm" className="h-7 text-[11px] gap-1 w-full">
-                          <LogIn className="h-3 w-3" />
-                          <span>ورود با گیت‌هاب</span>
-                        </Button>
-                      </a>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[11px] gap-1 w-full"
+                        onClick={() => signIn('github')}
+                      >
+                        <LogIn className="h-3 w-3" />
+                        <span>ورود با گیت‌هاب</span>
+                      </Button>
                     ) : (
                       <span className="text-[10px] text-amber-400/80">پیکربندی گیت‌هاب ناقص است</span>
                     )}
@@ -312,15 +316,15 @@ export default function HomePage() {
             <CardHeader className="p-4 pb-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-zinc-400">مدل‌های هوش مصنوعی</span>
-                <Terminal className="h-4 w-4 text-zinc-500" />
+                <Terminal className="h-4 w-4 text-[#87fcc4]" />
               </div>
               <CardTitle className="text-sm font-bold text-white mt-1">
-                غیرفعال (مرحله ۰)
+                فعال (دستیار هوشمند)
               </CardTitle>
             </CardHeader>
             <CardContent className="p-4 pt-1">
-              <div className="text-xs text-zinc-400">عدم فراخوانی لایو تجاری</div>
-              <div className="text-[10px] text-zinc-500 mt-1">اجرای کاملاً قطعی و امن</div>
+              <div className="text-xs text-zinc-300">اتوماسیون SRE و ابزارهای لیارا</div>
+              <div className="text-[10px] text-zinc-500 mt-1">اجرای امن و نیازمند تایید صریح</div>
             </CardContent>
           </Card>
         </div>
@@ -365,8 +369,8 @@ export default function HomePage() {
                     </div>
                   </div>
                   <div className="p-3 rounded-lg border border-[#323644] bg-[#181818] space-y-1">
-                    <span className="text-[11px] text-zinc-400">هوش مصنوعی زنده:</span>
-                    <div className="text-sm font-bold text-zinc-400">غیرفعال (محیط ایزوله)</div>
+                    <span className="text-[11px] text-zinc-400">هوش مصنوعی و ایجنت:</span>
+                    <div className="text-sm font-bold text-[#87fcc4]">فعال (دستیار هوشمند)</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-3 pt-2">
@@ -465,10 +469,10 @@ export default function HomePage() {
 
                 <div className="p-3.5 rounded-lg border border-[#323644] bg-[#181818] flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <span className="font-semibold text-white block">عدم فراخوانی لایو به هوش مصنوعی</span>
-                    <span className="text-[11px] text-zinc-400">عدم ارسال درخواست یا مصرف اعتبار تا زمان تثبیت کامل ساختار و ابزارها.</span>
+                    <span className="font-semibold text-white block">حفاظت و تایید صریح عملیات</span>
+                    <span className="text-[11px] text-zinc-400">تمامی تصمیمات و سناریوهای استقرار با تایید صریح کاربر اجرا می‌شوند.</span>
                   </div>
-                  <Badge variant="outline">غیرفعال (ایمن)</Badge>
+                  <Badge variant="mint">فعال (ایمن)</Badge>
                 </div>
               </div>
             </CardContent>

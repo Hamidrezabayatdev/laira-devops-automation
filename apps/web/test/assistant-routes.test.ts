@@ -59,6 +59,8 @@ describe('Assistant API Routes & Contract Validation', () => {
         input: {
           task: input.task,
           ...(input.repository ? { repository: input.repository } : {}),
+          ...(input.connectionId ? { connectionId: input.connectionId } : {}),
+          ...(input.runtimeEnvironment ? { runtimeEnvironment: input.runtimeEnvironment } : {}),
         },
         output: null,
         error: null,
@@ -109,6 +111,8 @@ describe('Assistant API Routes & Contract Validation', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    fakeDbAdapter.validateConnection = vi.fn().mockResolvedValue({ valid: true });
+    fakeDbAdapter.validateRuntimeEnvironment = vi.fn().mockResolvedValue({ valid: true });
     setAssistantDbAdapter(fakeDbAdapter);
     fakeStore.runs = {};
     fakeStore.events = {};
@@ -380,6 +384,49 @@ describe('Assistant API Routes & Contract Validation', () => {
       const data = await res.json();
       expect(data.code).toBe('INVALID_REPOSITORY');
     });
+
+    it('rejects invalid connectionId format with 400 INVALID_CONNECTION_ID_FORMAT', async () => {
+      const req = new Request('http://localhost:3000/api/assistant', {
+        method: 'POST',
+        headers: defaultHeaders,
+        body: JSON.stringify({
+          task: 'بررسی وضعیت برنامه',
+          connectionId: 'conn; DROP TABLE users;--',
+        }),
+      });
+
+      const res = await createAssistantTaskRoute(req);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.code).toBe('INVALID_CONNECTION_ID_FORMAT');
+    });
+
+    it.each([
+      ['string version', '1'],
+      ['string with garbage', '1garbage'],
+      ['fractional float', 1.5],
+      ['null', null],
+      ['object', { version: 1 }],
+      ['zero', 0],
+      ['negative', -1],
+    ])('rejects runtimeEnvironment when credentialVersion is %s', async (_, invalidVersion) => {
+      const req = new Request('http://localhost:3000/api/assistant', {
+        method: 'POST',
+        headers: defaultHeaders,
+        body: JSON.stringify({
+          task: 'بررسی وضعیت برنامه',
+          runtimeEnvironment: {
+            connectionId: 'conn_env_1',
+            credentialVersion: invalidVersion,
+          },
+        }),
+      });
+
+      const res = await createAssistantTaskRoute(req);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.code).toBe('INVALID_CREDENTIAL_VERSION');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -419,6 +466,110 @@ describe('Assistant API Routes & Contract Validation', () => {
           ref: 'staging',
         },
       });
+    });
+
+    it('accepts explicit connectionId and runtimeEnvironment and performs owner precheck', async () => {
+      fakeDbAdapter.validateConnection = vi.fn().mockResolvedValue({ valid: true });
+      fakeDbAdapter.validateRuntimeEnvironment = vi.fn().mockResolvedValue({ valid: true });
+      const createSpy = vi.spyOn(fakeDbAdapter, 'createAgentRun');
+
+      const req = new Request('http://localhost:3000/api/assistant', {
+        method: 'POST',
+        headers: defaultHeaders,
+        body: JSON.stringify({
+          task: 'بررسی وضعیت برنامه‌های لیارا',
+          connectionId: 'conn_liara_123',
+          runtimeEnvironment: {
+            connectionId: 'conn_env_456',
+            credentialVersion: 2,
+          },
+        }),
+      });
+
+      const res = await createAssistantTaskRoute(req);
+      expect(res.status).toBe(202);
+
+      const data = await res.json();
+      expect(data.connectionId).toBe('conn_liara_123');
+      expect(data.runtimeEnvironment).toEqual({
+        connectionId: 'conn_env_456',
+        credentialVersion: 2,
+      });
+
+      expect(fakeDbAdapter.validateConnection).toHaveBeenCalledWith(mockWorkspaceId, 'conn_liara_123');
+      expect(fakeDbAdapter.validateRuntimeEnvironment).toHaveBeenCalledWith(mockWorkspaceId, {
+        connectionId: 'conn_env_456',
+        credentialVersion: 2,
+      });
+      expect(createSpy).toHaveBeenCalledWith(mockWorkspaceId, {
+        task: 'بررسی وضعیت برنامه‌های لیارا',
+        connectionId: 'conn_liara_123',
+        runtimeEnvironment: {
+          connectionId: 'conn_env_456',
+          credentialVersion: 2,
+        },
+      });
+    });
+
+    it('rejects task with 400 when connectionId fails owner-scoped precheck', async () => {
+      fakeDbAdapter.validateConnection = vi.fn().mockResolvedValue({
+        valid: false,
+        error: 'اتصال مورد نظر در فضای کاری یافت نشد',
+        code: 'CONNECTION_NOT_FOUND',
+      });
+
+      const req = new Request('http://localhost:3000/api/assistant', {
+        method: 'POST',
+        headers: defaultHeaders,
+        body: JSON.stringify({
+          task: 'بررسی وضعیت',
+          connectionId: 'conn_other_workspace',
+        }),
+      });
+
+      const res = await createAssistantTaskRoute(req);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.code).toBe('CONNECTION_NOT_FOUND');
+    });
+
+    it('fails closed with 503 VALIDATION_UNAVAILABLE when connectionId is provided but adapter lacks validateConnection', async () => {
+      fakeDbAdapter.validateConnection = undefined;
+
+      const req = new Request('http://localhost:3000/api/assistant', {
+        method: 'POST',
+        headers: defaultHeaders,
+        body: JSON.stringify({
+          task: 'بررسی وضعیت',
+          connectionId: 'conn_liara_123',
+        }),
+      });
+
+      const res = await createAssistantTaskRoute(req);
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe('VALIDATION_UNAVAILABLE');
+    });
+
+    it('fails closed with 503 VALIDATION_UNAVAILABLE when runtimeEnvironment is provided but adapter lacks validateRuntimeEnvironment', async () => {
+      fakeDbAdapter.validateRuntimeEnvironment = undefined;
+
+      const req = new Request('http://localhost:3000/api/assistant', {
+        method: 'POST',
+        headers: defaultHeaders,
+        body: JSON.stringify({
+          task: 'بررسی وضعیت',
+          runtimeEnvironment: {
+            connectionId: 'conn_env_123',
+            credentialVersion: 1,
+          },
+        }),
+      });
+
+      const res = await createAssistantTaskRoute(req);
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe('VALIDATION_UNAVAILABLE');
     });
   });
 
@@ -470,6 +621,47 @@ describe('Assistant API Routes & Contract Validation', () => {
       expect(data.progress).toHaveLength(1);
       expect(data.progress[0].step).toBe('inspect_liara');
       expect(data.progress[0].message).toBe('بررسی پروژه‌های فعال');
+    });
+
+    it('returns connectionId and runtimeEnvironment metadata on GET /api/assistant/[id]', async () => {
+      const runId = 'run_agent_conn_query';
+      fakeStore.runs[runId] = {
+        id: runId,
+        workspaceId: mockWorkspaceId,
+        type: 'agent_task',
+        status: 'queued',
+        input: {
+          task: 'بررسی پروژه‌ها',
+          connectionId: 'conn_liara_test',
+          runtimeEnvironment: {
+            connectionId: 'conn_env_test',
+            credentialVersion: 3,
+          },
+        },
+        output: null,
+        error: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        finishedAt: null,
+      };
+
+      const req = new Request(`http://localhost:3000/api/assistant/${runId}`, {
+        method: 'GET',
+        headers: defaultHeaders,
+      });
+
+      const res = await getAssistantTaskRoute(req, {
+        params: Promise.resolve({ id: runId }),
+      });
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.runId).toBe(runId);
+      expect(data.connectionId).toBe('conn_liara_test');
+      expect(data.runtimeEnvironment).toEqual({
+        connectionId: 'conn_env_test',
+        credentialVersion: 3,
+      });
     });
 
     it('returns verified proposedAction and proposalHash when hash matches strict domain schema', async () => {

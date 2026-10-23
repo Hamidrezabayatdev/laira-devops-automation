@@ -57,12 +57,13 @@ export async function GET(request: Request) {
       workspaceId: auth.user.workspaceId,
     });
 
-    // Strictly project provider, name, id, status only - NEVER return ciphertext or raw credential
+    // Strictly project provider, name, id, status, activeVersion only - NEVER return ciphertext or raw credential
     const safeConnections = connections.map((conn) => ({
       id: conn.id,
       name: conn.name,
       provider: conn.provider,
       status: conn.status === 'active' ? 'configured_unverified' : conn.status,
+      activeVersion: conn.activeVersion,
     }));
 
     return Response.json({ connections: safeConnections }, { status: 200 });

@@ -192,6 +192,61 @@ export async function POST(request: Request) {
   // 7. Create durable agent task run in DB (strictly scoped to auth workspace)
   try {
     const adapter = getAssistantDbAdapter();
+
+    // Owner-scoped precheck for explicit connectionId (fail closed 503 if capability missing)
+    if (validation.input.connectionId) {
+      if (!adapter.validateConnection) {
+        return Response.json(
+          {
+            error: 'سرویس اعتبارسنجی اتصال در دسترس نیست (503 Service Unavailable)',
+            code: 'VALIDATION_UNAVAILABLE',
+            message: 'سرویس اعتبارسنجی اتصال در دسترس نیست',
+            retryable: true,
+          },
+          { status: 503 },
+        );
+      }
+      const connCheck = await adapter.validateConnection(auth.user.workspaceId, validation.input.connectionId);
+      if (!connCheck.valid) {
+        return Response.json(
+          {
+            error: connCheck.error || 'اتصال نامعتبر است',
+            code: connCheck.code || 'INVALID_CONNECTION',
+            message: connCheck.error || 'اتصال نامعتبر است',
+            retryable: false,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    // Owner-scoped precheck for explicit runtimeEnvironment (fail closed 503 if capability missing)
+    if (validation.input.runtimeEnvironment) {
+      if (!adapter.validateRuntimeEnvironment) {
+        return Response.json(
+          {
+            error: 'سرویس اعتبارسنجی محیط اجرا در دسترس نیست (503 Service Unavailable)',
+            code: 'VALIDATION_UNAVAILABLE',
+            message: 'سرویس اعتبارسنجی محیط اجرا در دسترس نیست',
+            retryable: true,
+          },
+          { status: 503 },
+        );
+      }
+      const envCheck = await adapter.validateRuntimeEnvironment(auth.user.workspaceId, validation.input.runtimeEnvironment);
+      if (!envCheck.valid) {
+        return Response.json(
+          {
+            error: envCheck.error || 'محیط اجرای نامعتبر است',
+            code: envCheck.code || 'INVALID_RUNTIME_ENVIRONMENT',
+            message: envCheck.error || 'محیط اجرای نامعتبر است',
+            retryable: false,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     const run = await adapter.createAgentRun(auth.user.workspaceId, validation.input);
 
     return Response.json(
@@ -201,6 +256,8 @@ export async function POST(request: Request) {
         status: run.status || 'queued',
         task: validation.input.task,
         ...(validation.input.repository ? { repository: validation.input.repository } : {}),
+        ...(validation.input.connectionId ? { connectionId: validation.input.connectionId } : {}),
+        ...(validation.input.runtimeEnvironment ? { runtimeEnvironment: validation.input.runtimeEnvironment } : {}),
         createdAt: run.createdAt,
       },
       { status: 202 },

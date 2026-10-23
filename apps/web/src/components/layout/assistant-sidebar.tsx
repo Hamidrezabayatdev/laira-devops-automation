@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { signIn } from 'next-auth/react';
 import {
   Bot,
   Send,
@@ -14,6 +15,9 @@ import {
   Terminal,
   Zap,
   Link as LinkIcon,
+  LogIn,
+  Server,
+  Sliders,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import type {
@@ -31,11 +35,24 @@ interface AssistantSidebarProps {
   className?: string;
 }
 
+interface ConnectionOption {
+  id: string;
+  name: string;
+  provider: string;
+  status: string;
+  activeVersion?: number;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content?: string;
   repository?: string;
+  connectionId?: string;
+  runtimeEnvironment?: {
+    connectionId: string;
+    credentialVersion: number;
+  };
   runId?: string;
   status?: string;
   progress?: AgentProgressEvent[];
@@ -65,6 +82,10 @@ export function AssistantSidebar({
   const [inputTask, setInputTask] = React.useState('');
   const [inputRepo, setInputRepo] = React.useState('');
   const [showRepoField, setShowRepoField] = React.useState(false);
+  const [connections, setConnections] = React.useState<ConnectionOption[]>([]);
+  const [selectedConnectionId, setSelectedConnectionId] = React.useState<string>('');
+  const [selectedEnvConnectionId, setSelectedEnvConnectionId] = React.useState<string>('');
+  const [showConnectionConfig, setShowConnectionConfig] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [submittingApproveId, setSubmittingApproveId] = React.useState<string | null>(null);
   const [cancellingRunId, setCancellingRunId] = React.useState<string | null>(null);
@@ -77,7 +98,7 @@ export function AssistantSidebar({
       id: 'init_welcome',
       role: 'assistant',
       content:
-        'سلام! من دستیار عملیاتی دواپس لیارا هستم. وظایف مدیریت، بررسی یا استقرار خود را بنویسید تا پردازش و اجرا گردند.',
+        'سلام! من دستیار عملیاتی دواپس لیارا هستم. می‌توانم وضعیت برنامه‌ها و لاگ‌ها را بررسی کنم (list-apps, get-app, list-releases, get-logs) و پیشنهادهای استقرار، راه‌اندازی مجدد یا ساخت برنامه را برای تایید شما آماده سازم.',
       time: 'هم‌اکنون',
     },
   ]);
@@ -114,6 +135,22 @@ export function AssistantSidebar({
       isMounted = false;
     };
   }, []);
+
+  // 1.1 Fetch available workspace connections for selection
+  React.useEffect(() => {
+    if (!isAuthenticated) {
+      setConnections([]);
+      return;
+    }
+    fetch('/api/connections')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.connections && Array.isArray(data.connections)) {
+          setConnections(data.connections);
+        }
+      })
+      .catch(() => {});
+  }, [isAuthenticated]);
 
   // 2. Polling loop for active assistant run (every 2 seconds, with inflight guard and AbortController)
   React.useEffect(() => {
@@ -255,12 +292,19 @@ export function AssistantSidebar({
     setGeneralError(null);
     setIsSubmitting(true);
 
+    const envConn = connections.find((c) => c.id === selectedEnvConnectionId);
+    const runtimeEnv = envConn && envConn.activeVersion
+      ? { connectionId: envConn.id, credentialVersion: envConn.activeVersion }
+      : undefined;
+
     const userMsgId = `user_${Date.now()}`;
     const userMsg: ChatMessage = {
       id: userMsgId,
       role: 'user',
       content: trimmedTask,
       repository: trimmedRepo || undefined,
+      connectionId: selectedConnectionId || undefined,
+      runtimeEnvironment: runtimeEnv,
       time: 'هم‌اکنون',
     };
 
@@ -278,6 +322,8 @@ export function AssistantSidebar({
         body: JSON.stringify({
           task: trimmedTask,
           ...(trimmedRepo ? { repository: trimmedRepo } : {}),
+          ...(selectedConnectionId ? { connectionId: selectedConnectionId } : {}),
+          ...(runtimeEnv ? { runtimeEnvironment: runtimeEnv } : {}),
         }),
       });
 
@@ -482,13 +528,21 @@ export function AssistantSidebar({
         </div>
       </div>
 
-      {/* Unauthenticated Alert */}
+      {/* Unauthenticated Alert with Direct GitHub Login Button */}
       {!isAuthLoading && !isAuthenticated && (
-        <div className="border-b border-rose-900/40 bg-rose-950/30 px-3 py-2 text-right">
+        <div className="border-b border-rose-900/40 bg-rose-950/30 p-3 text-right space-y-2">
           <div className="flex items-center gap-2 text-rose-300 text-[11px]">
             <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
             <span>برای ارسال وظایف به دستیار، لطفاً وارد حساب گیت‌هاب شوید.</span>
           </div>
+          <button
+            type="button"
+            onClick={() => signIn('github')}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-md bg-[#28c1f5] text-[#181818] font-bold text-xs hover:bg-[#28c1f5]/90 transition-colors cursor-pointer"
+          >
+            <LogIn className="h-3.5 w-3.5" />
+            <span>ورود با گیت‌هاب</span>
+          </button>
         </div>
       )}
 
@@ -535,9 +589,25 @@ export function AssistantSidebar({
 
               {/* User attached repo indicator */}
               {msg.repository && (
-                <div className="flex items-center gap-1 text-[11px] text-zinc-400 bg-[#181818]/70 rounded px-2 py-1 mb-1.5 border border-[#323644]">
+                <div className="flex items-center gap-1 text-[11px] text-zinc-400 bg-[#181818]/70 rounded px-2 py-1 mb-1 border border-[#323644]">
                   <GitBranch className="h-3 w-3 text-[#28c1f5]" />
                   <span className="truncate" dir="ltr">{msg.repository}</span>
+                </div>
+              )}
+
+              {/* User selected connection indicator */}
+              {msg.connectionId && (
+                <div className="flex items-center gap-1 text-[10px] text-emerald-300 bg-[#181818]/70 rounded px-2 py-0.5 mb-1 border border-[#323644] font-mono" dir="ltr">
+                  <Server className="h-2.5 w-2.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">conn: {msg.connectionId}</span>
+                </div>
+              )}
+
+              {/* User selected runtime environment indicator */}
+              {msg.runtimeEnvironment && (
+                <div className="flex items-center gap-1 text-[10px] text-cyan-300 bg-[#181818]/70 rounded px-2 py-0.5 mb-1 border border-[#323644] font-mono" dir="ltr">
+                  <Sliders className="h-2.5 w-2.5 text-cyan-400 shrink-0" />
+                  <span className="truncate">env: {msg.runtimeEnvironment.connectionId} (v{msg.runtimeEnvironment.credentialVersion})</span>
                 </div>
               )}
 
@@ -897,15 +967,71 @@ export function AssistantSidebar({
           </div>
         ) : (
           <div className="flex justify-between items-center text-[10px] text-zinc-400 px-1">
-            <button
-              type="button"
-              onClick={() => setShowRepoField(true)}
-              className="flex items-center gap-1 hover:text-[#28c1f5] transition-colors"
-            >
-              <GitBranch className="h-3 w-3" />
-              <span>افزودن نشانی مخزن گیت‌هاب (اختیاری)</span>
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowRepoField(true)}
+                className="flex items-center gap-1 hover:text-[#28c1f5] transition-colors cursor-pointer"
+              >
+                <GitBranch className="h-3 w-3" />
+                <span>مخزن گیت‌هاب</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowConnectionConfig(!showConnectionConfig)}
+                className={`flex items-center gap-1 hover:text-[#87fcc4] transition-colors cursor-pointer ${
+                  selectedConnectionId || selectedEnvConnectionId ? 'text-[#87fcc4] font-semibold' : ''
+                }`}
+              >
+                <Server className="h-3 w-3" />
+                <span>
+                  {selectedConnectionId || selectedEnvConnectionId
+                    ? 'اتصال انتخاب‌شده'
+                    : 'انتخاب اتصال / محیط'}
+                </span>
+              </button>
+            </div>
             <span className="text-zinc-500">{inputTask.length}/4000</span>
+          </div>
+        )}
+
+        {/* Optional Connection and Runtime Environment Selectors */}
+        {showConnectionConfig && (
+          <div className="rounded-lg border border-[#323644] bg-[#181818] p-2 space-y-2 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-zinc-400 shrink-0">اتصال ابری لیارا:</span>
+              <select
+                value={selectedConnectionId}
+                onChange={(e) => setSelectedConnectionId(e.target.value)}
+                className="bg-[#23252D] border border-[#323644] rounded text-zinc-200 text-[10px] py-1 px-1.5 flex-1 min-w-0"
+              >
+                <option value="">پیش‌فرض فضای کاری (کشف خودکار)</option>
+                {connections
+                  .filter((c) => c.provider === 'liara')
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.id.slice(0, 10)}...)
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#323644]/50">
+              <span className="text-zinc-400 shrink-0">متغیرهای محیطی:</span>
+              <select
+                value={selectedEnvConnectionId}
+                onChange={(e) => setSelectedEnvConnectionId(e.target.value)}
+                className="bg-[#23252D] border border-[#323644] rounded text-zinc-200 text-[10px] py-1 px-1.5 flex-1 min-w-0"
+              >
+                <option value="">بدون متغیر محیطی اختصاصی</option>
+                {connections
+                  .filter((c) => c.provider === 'deployment_env')
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} (v{c.activeVersion || 1})
+                    </option>
+                  ))}
+              </select>
+            </div>
           </div>
         )}
 

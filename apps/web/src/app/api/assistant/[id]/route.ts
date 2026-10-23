@@ -76,6 +76,12 @@ export async function GET(
       rawInput.repository && typeof rawInput.repository === 'object'
         ? rawInput.repository
         : undefined;
+    const connectionId =
+      typeof rawInput.connectionId === 'string' ? rawInput.connectionId : undefined;
+    const runtimeEnvironment =
+      rawInput.runtimeEnvironment && typeof rawInput.runtimeEnvironment === 'object'
+        ? (rawInput.runtimeEnvironment as { connectionId: string; credentialVersion: number })
+        : undefined;
 
     let errorStr: string | null = null;
     if (run.error) {
@@ -99,6 +105,8 @@ export async function GET(
         type: run.type,
         task,
         ...(repository ? { repository } : {}),
+        ...(connectionId ? { connectionId } : {}),
+        ...(runtimeEnvironment ? { runtimeEnvironment } : {}),
         output: sanitizedOutput,
         verificationPhase: sanitizedOutput?.verificationPhase,
         progress,

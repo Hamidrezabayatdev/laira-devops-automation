@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import { signIn } from 'next-auth/react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -200,13 +201,14 @@ export default function ConnectionsSettingsPage() {
                 مدیریت و اتصال کلیدهای ارائه‌دهندگان ابری تنها برای مالکان فضای کاری احراز هویت شده مجاز است. لطفاً ابتدا وارد حساب خود شوید.
               </p>
               <div className="pt-2">
-                <Link
-                  href="/api/auth/signin"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500 text-black hover:bg-amber-400 transition"
+                <button
+                  type="button"
+                  onClick={() => signIn('github')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500 text-black hover:bg-amber-400 transition cursor-pointer"
                 >
                   <LogIn className="h-3.5 w-3.5" />
                   ورود با گیت‌هاب
-                </Link>
+                </button>
               </div>
             </div>
           </div>

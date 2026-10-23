@@ -76,6 +76,11 @@ export interface AgentTaskRepository {
 export interface AgentTaskInput {
   task: string;
   repository?: AgentTaskRepository;
+  connectionId?: string;
+  runtimeEnvironment?: {
+    connectionId: string;
+    credentialVersion: number;
+  };
 }
 
 export interface AgentTaskVerification {
@@ -349,11 +354,103 @@ export function validateAgentTaskInput(body: unknown):
     };
   }
 
+  // Optional connectionId validation
+  let connectionId: string | undefined = undefined;
+  if ('connectionId' in raw && raw.connectionId !== undefined && raw.connectionId !== null) {
+    if (typeof raw.connectionId !== 'string') {
+      return {
+        valid: false,
+        error: 'شناسه اتصال (connectionId) باید رشته متنی باشد',
+        code: 'INVALID_CONNECTION_ID',
+      };
+    }
+    const trimmedConn = raw.connectionId.trim();
+    if (!trimmedConn) {
+      return {
+        valid: false,
+        error: 'شناسه اتصال نمی‌تواند خالی باشد',
+        code: 'EMPTY_CONNECTION_ID',
+      };
+    }
+    if (trimmedConn.length > 128) {
+      return {
+        valid: false,
+        error: 'طول شناسه اتصال بیش از حد مجاز است (حداکثر ۱۲۸ کاراکتر)',
+        code: 'CONNECTION_ID_TOO_LONG',
+      };
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(trimmedConn)) {
+      return {
+        valid: false,
+        error: 'شناسه اتصال حاوی کاراکترهای غیرمجاز است',
+        code: 'INVALID_CONNECTION_ID_FORMAT',
+      };
+    }
+    connectionId = trimmedConn;
+  }
+
+  // Optional runtimeEnvironment validation
+  let runtimeEnvironment: { connectionId: string; credentialVersion: number } | undefined = undefined;
+  const rawEnv = raw.runtimeEnvironment ?? (
+    raw.environmentConnectionId !== undefined || raw.environmentCredentialVersion !== undefined
+      ? { connectionId: raw.environmentConnectionId, credentialVersion: raw.environmentCredentialVersion }
+      : undefined
+  );
+
+  if (rawEnv !== undefined && rawEnv !== null) {
+    if (typeof rawEnv !== 'object' || Array.isArray(rawEnv)) {
+      return {
+        valid: false,
+        error: 'مشخصات محیط اجرا (runtimeEnvironment) باید یک شیء معتبر باشد',
+        code: 'INVALID_RUNTIME_ENVIRONMENT',
+      };
+    }
+    const envObj = rawEnv as Record<string, unknown>;
+    if (typeof envObj.connectionId !== 'string' || !envObj.connectionId.trim()) {
+      return {
+        valid: false,
+        error: 'شناسه اتصال محیط اجرا (connectionId) الزامی است',
+        code: 'INVALID_ENV_CONNECTION_ID',
+      };
+    }
+    const trimmedEnvConn = envObj.connectionId.trim();
+    if (trimmedEnvConn.length > 128) {
+      return {
+        valid: false,
+        error: 'طول شناسه اتصال محیط بیش از حد مجاز است',
+        code: 'ENV_CONNECTION_ID_TOO_LONG',
+      };
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(trimmedEnvConn)) {
+      return {
+        valid: false,
+        error: 'شناسه اتصال محیط حاوی کاراکترهای غیرمجاز است',
+        code: 'INVALID_ENV_CONNECTION_ID_FORMAT',
+      };
+    }
+
+    const credVer = envObj.credentialVersion;
+    if (typeof credVer !== 'number' || !Number.isSafeInteger(credVer) || credVer <= 0) {
+      return {
+        valid: false,
+        error: 'نسخه کلید محیط اجرا (credentialVersion) باید عدد صحیح مثبت باشد',
+        code: 'INVALID_CREDENTIAL_VERSION',
+      };
+    }
+
+    runtimeEnvironment = {
+      connectionId: trimmedEnvConn,
+      credentialVersion: credVer,
+    };
+  }
+
   return {
     valid: true,
     input: {
       task: trimmedTask,
       ...(repoResult.repository ? { repository: repoResult.repository } : {}),
+      ...(connectionId ? { connectionId } : {}),
+      ...(runtimeEnvironment ? { runtimeEnvironment } : {}),
     },
   };
 }
@@ -538,6 +635,14 @@ export interface AssistantDbAdapter {
     workspaceId: string,
     runId: string,
   ): Promise<RunEvent[]>;
+  validateConnection?(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<{ valid: boolean; error?: string; code?: string }>;
+  validateRuntimeEnvironment?(
+    workspaceId: string,
+    env: { connectionId: string; credentialVersion: number },
+  ): Promise<{ valid: boolean; error?: string; code?: string }>;
 }
 
 export const defaultAssistantDbAdapter: AssistantDbAdapter = {
@@ -557,6 +662,8 @@ export const defaultAssistantDbAdapter: AssistantDbAdapter = {
           input: {
             task: input.task,
             ...(input.repository ? { repository: input.repository } : {}),
+            ...(input.connectionId ? { connectionId: input.connectionId } : {}),
+            ...(input.runtimeEnvironment ? { runtimeEnvironment: input.runtimeEnvironment } : {}),
           },
           initialMessage: `وظیفه دستیار هوشمند ثبت گردید: ${input.task.slice(0, 80)}`,
         },
@@ -565,6 +672,97 @@ export const defaultAssistantDbAdapter: AssistantDbAdapter = {
     } catch (err: unknown) {
       if (err instanceof DatabaseUnavailableError) throw err;
       throw new DatabaseUnavailableError('Database operation failed during assistant run creation');
+    }
+  },
+
+  async validateConnection(workspaceId, connectionId) {
+    let pool;
+    try {
+      pool = getDatabasePool();
+    } catch {
+      throw new DatabaseUnavailableError('Database connection pool unavailable');
+    }
+    try {
+      const connRes = await pool.query(
+        `SELECT id, workspace_id, provider, status, active_version
+         FROM app.connections
+         WHERE id = $1 AND workspace_id = $2
+         LIMIT 1`,
+        [connectionId, workspaceId],
+      );
+      if (!connRes.rows || connRes.rows.length === 0) {
+        return { valid: false, error: 'اتصال مورد نظر در فضای کاری یافت نشد', code: 'CONNECTION_NOT_FOUND' };
+      }
+      const conn = connRes.rows[0];
+      if (conn.provider !== 'liara') {
+        return { valid: false, error: 'ارائه‌دهنده اتصال باید liara باشد', code: 'INVALID_CONNECTION_PROVIDER' };
+      }
+      const ELIGIBLE_STATUSES = new Set(['active', 'configured_unverified']);
+      if (!ELIGIBLE_STATUSES.has(conn.status)) {
+        return { valid: false, error: 'اتصال انتخاب‌شده در وضعیت معتبر و فعال قرار ندارد', code: 'CONNECTION_INELIGIBLE' };
+      }
+      const activeVer = Number(conn.active_version);
+      if (!Number.isInteger(activeVer) || activeVer <= 0) {
+        return { valid: false, error: 'نسخه کلید اتصال نامعتبر است', code: 'INVALID_CREDENTIAL_VERSION' };
+      }
+      const credRes = await pool.query(
+        `SELECT id FROM app.connection_credential_versions
+         WHERE workspace_id = $1 AND connection_id = $2 AND version = $3
+         LIMIT 1`,
+        [workspaceId, connectionId, activeVer],
+      );
+      if (!credRes.rows || credRes.rows.length === 0) {
+        return { valid: false, error: 'رکورد نسخه کلید امنیتی اتصال یافت نشد', code: 'CREDENTIAL_VERSION_NOT_FOUND' };
+      }
+      return { valid: true };
+    } catch (err: unknown) {
+      if (err instanceof DatabaseUnavailableError) throw err;
+      throw new DatabaseUnavailableError('Database query failed during connection validation');
+    }
+  },
+
+  async validateRuntimeEnvironment(workspaceId, env) {
+    let pool;
+    try {
+      pool = getDatabasePool();
+    } catch {
+      throw new DatabaseUnavailableError('Database connection pool unavailable');
+    }
+    try {
+      const connRes = await pool.query(
+        `SELECT id, workspace_id, provider, status, active_version
+         FROM app.connections
+         WHERE id = $1 AND workspace_id = $2
+         LIMIT 1`,
+        [env.connectionId, workspaceId],
+      );
+      if (!connRes.rows || connRes.rows.length === 0) {
+        return { valid: false, error: 'اتصال متغیرهای محیطی در فضای کاری یافت نشد', code: 'ENV_CONNECTION_NOT_FOUND' };
+      }
+      const conn = connRes.rows[0];
+      if (conn.provider !== 'deployment_env') {
+        return { valid: false, error: 'ارائه‌دهنده اتصال محیط باید deployment_env باشد', code: 'INVALID_ENV_PROVIDER' };
+      }
+      const ELIGIBLE_STATUSES = new Set(['active', 'configured_unverified']);
+      if (!ELIGIBLE_STATUSES.has(conn.status)) {
+        return { valid: false, error: 'اتصال محیط در وضعیت معتبر قرار ندارد', code: 'ENV_CONNECTION_INELIGIBLE' };
+      }
+      if (Number(conn.active_version) !== env.credentialVersion) {
+        return { valid: false, error: 'نسخه کلید محیط با نسخه فعال اتصال همخوانی ندارد', code: 'ENV_VERSION_MISMATCH' };
+      }
+      const credRes = await pool.query(
+        `SELECT id FROM app.connection_credential_versions
+         WHERE workspace_id = $1 AND connection_id = $2 AND version = $3
+         LIMIT 1`,
+        [workspaceId, env.connectionId, env.credentialVersion],
+      );
+      if (!credRes.rows || credRes.rows.length === 0) {
+        return { valid: false, error: 'رکورد نسخه کلید محیط یافت نشد', code: 'ENV_CREDENTIAL_NOT_FOUND' };
+      }
+      return { valid: true };
+    } catch (err: unknown) {
+      if (err instanceof DatabaseUnavailableError) throw err;
+      throw new DatabaseUnavailableError('Database query failed during environment validation');
     }
   },
 

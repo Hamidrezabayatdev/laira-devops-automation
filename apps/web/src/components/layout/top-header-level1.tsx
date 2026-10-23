@@ -1,9 +1,10 @@
 'use client';
 
 import Link from 'next/link';
+import { signIn, signOut } from 'next-auth/react';
 import { Badge } from '@/components/ui/badge';
 import { Mono } from '@/components/ui/ltr';
-import { Activity, Database, Layers, Sparkles, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Activity, Database, Layers, Sparkles, ShieldCheck, ShieldAlert, LogIn, LogOut } from 'lucide-react';
 
 export interface TopHeaderLevel1Props {
   workspaceName?: string;
@@ -160,7 +161,7 @@ export function TopHeaderLevel1({
         )}
 
         {/* Security / OAuth status pill - Never default to fake verified 152868728 when unauthenticated */}
-        <div className="flex items-center gap-1 text-xs shrink-0 max-w-[125px] xs:max-w-[160px] sm:max-w-none">
+        <div className="flex items-center gap-1.5 text-xs shrink-0 max-w-[140px] xs:max-w-[180px] sm:max-w-none">
           {isDemo ? (
             <>
               <ShieldCheck className="h-4 w-4 text-[#87fcc4] shrink-0" />
@@ -168,16 +169,31 @@ export function TopHeaderLevel1({
               <Mono className="text-zinc-200 text-xs truncate">152868728 (دمو)</Mono>
             </>
           ) : isAuthenticated && currentUser ? (
-            <>
+            <div className="flex items-center gap-1.5">
               <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
-              <span className="hidden sm:inline text-zinc-400">مالک تایید شده:</span>
+              <span className="hidden sm:inline text-zinc-400">مالک:</span>
               <Mono className="text-zinc-200 text-xs truncate">{currentUser.githubNumericId}</Mono>
-            </>
+              <button
+                type="button"
+                onClick={() => signOut({ callbackUrl: '/' })}
+                className="flex items-center gap-1 rounded border border-[#323644] bg-[#23252D] px-1.5 py-0.5 text-[10px] text-zinc-400 hover:text-white transition-colors"
+                title="خروج از حساب کاربری"
+              >
+                <LogOut className="h-2.5 w-2.5" />
+                <span className="hidden md:inline">خروج</span>
+              </button>
+            </div>
           ) : (
-            <div className="flex items-center gap-1 text-zinc-400 text-[11px] sm:text-xs">
+            <div className="flex items-center gap-1.5 text-zinc-400 text-[11px] sm:text-xs">
               <ShieldAlert className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
-              <span className="text-zinc-400 whitespace-nowrap">احراز هویت:</span>
-              <span className="text-amber-400/90 whitespace-nowrap">وارد نشده</span>
+              <button
+                type="button"
+                onClick={() => signIn('github')}
+                className="flex items-center gap-1 rounded bg-[#28c1f5]/20 border border-[#28c1f5]/40 px-2 py-0.5 text-[11px] font-medium text-[#28c1f5] hover:bg-[#28c1f5]/30 transition-colors cursor-pointer"
+              >
+                <LogIn className="h-3 w-3" />
+                <span>ورود با گیت‌هاب</span>
+              </button>
             </div>
           )}
         </div>
